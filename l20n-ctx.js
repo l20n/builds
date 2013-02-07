@@ -1044,11 +1044,11 @@ define(function () {
       if (!_resource.isReady) {
         throw "Error: context not ready";
       }
-      var entity = _entries[id];
-      if (!entity) {
+      if (!_entries.hasOwnProperty(id)) {
         emit('Missing entity', id);
         return getFromSubContext(id, data);
       }
+      var entity = _entries[id];
       var args = getArgs(data);
       try {
         return entity.toString(args);

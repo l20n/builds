@@ -746,47 +746,6 @@ define(function () {
 (function() {
   'use strict';
 
-//var XMLHttpRequest = require('xmlhttprequest').XMLHttpRequest;
-//XMLHttpRequest.prototype.overrideMimeType = function() {};
-//var when = require('./when.js');
-
-  this.IO = {
-    loadAsync: function(url) {
-      var deferred = when.defer();
-      var xhr = new XMLHttpRequest();
-      xhr.overrideMimeType('text/plain');
-      xhr.addEventListener('load', function() {
-        if (xhr.status == 200) {
-          deferred.resolve(xhr.responseText);
-        } else {
-          deferred.reject();
-        }
-      });
-      xhr.addEventListener('abort', function(e) {
-        return when.reject(e);
-      });
-      xhr.open('GET', url, true);
-      xhr.send('');
-      return deferred.promise;
-    },
-
-    loadSync: function(url) {
-      var xhr = new XMLHttpRequest();
-      xhr.overrideMimeType('text/plain');
-      xhr.open('GET', url, false);
-      xhr.send('');
-      if (xhr.status == 200) {
-        return xhr.responseText;
-      } else {
-        return false;
-      }
-    }
-  }
-
-}).call(this);
-(function() {
-  'use strict';
-
   var L20n = {
     getContext: function L20n_getContext(id) {
       return new Context(id);
@@ -885,7 +844,7 @@ define(function () {
         url = relativeToSelf(url);
       }
       //url = L20n.env.getURL(url, true);
-      IO.loadAsync(url).then(
+      L20n.IO.loadAsync(url).then(
         function loadResource_success(text) {
           var source = new Source(url, text);
           loaded.resolve(source);
@@ -917,7 +876,7 @@ define(function () {
       var text = null;
       if (ctx.settings.schemes.length >= attempt+1 ||
           (ctx.settings.schemes.length === 0 && attempt === 0)) {
-        text = IO.loadSync(url);
+        text = L20n.IO.loadSync(url);
         if (text) {
           var source = new Source(url, text);
           return source;
@@ -1003,6 +962,7 @@ define(function () {
     var _resource = new Resource(null, this, _parser);
     var _entries = {};
     var _ctxdata = {};
+    // singleton within the context
     var _globals = {
       get hour() {
         return new Date().getHours();
@@ -1044,7 +1004,8 @@ define(function () {
       if (!_resource.isReady) {
         throw "Error: context not ready";
       }
-      if (!_entries.hasOwnProperty(id)) {
+      if (!_entries.hasOwnProperty(id) ||
+          _entries[id].local === true) {
         emit('Missing entity', id);
         return getFromSubContext(id, data);
       }
@@ -1073,10 +1034,20 @@ define(function () {
     }
 
     function getArgs(data) {
-      var args = Object.create(_ctxdata);
+      if (!data) {
+        return _ctxdata;
+      }
+      var args = {};
+      for (var i in _ctxdata) {
+        if (_ctxdata.hasOwnProperty(i)) {
+          args[i] = _ctxdata[i];
+        }
+      }
       if (data) {
-        for (var i in data) {
-          args[i] = data[i];
+        for (i in data) {
+          if (data.hasOwnProperty(i)) {
+            args[i] = data[i];
+          }
         }
       }
       return args;
@@ -1102,23 +1073,27 @@ define(function () {
         self.addEventListener('ready', function() {
           var values = resolveMany(ids, data);
           deferred.resolve(values);
+          //self.removeEventListener('ready', '???');
         });
       }
       return deferred.promise;
     }
 
-    function getAttribute(id, data) {
+    function getAttribute(id, attr, data) {
       if (!_resource.isReady) {
         throw "Error: context not ready";
       }
-      var entity = _entries[id];
-      if (!entity || entity.local) {
-        throw "No such entity: " + id;
+      if (!_entries.hasOwnProperty(id) ||
+          _entries[id].local === true) {
+        throw 'Missing entity: ' + id;
       }
-      var attribute = entity.attributes[attr]
-      if (!attribute || attribute.local) {
+      var entity = _entries[id];
+
+      if (!entity.attributes.hasOwnProperty(attr) ||
+           entity.attributes[attr].local === true) {
         throw "No such attribute: " + attr;
       }
+      var attribute = entity.attributes[attr]
       var args = getArgs(data);
       return attribute.toString(args);
     }
@@ -1127,10 +1102,13 @@ define(function () {
       if (!_resource.isReady) {
         throw "Error: context not ready";
       }
-      var entity = _entries[id];
-      if (!entity || entity.local) {
-        throw "No such entity: " + id;
+      if (!_entries.hasOwnProperty(id) ||
+          _entries[id].local === true) {
+            // getEntityFromSubcontext
+        throw 'Missing entity: ' + id;
       }
+      var entity = _entries[id];
+
       var args = getArgs(data);
       var attributes = {};
       for (var attr in entity.attributes) {
@@ -1182,7 +1160,8 @@ define(function () {
         }
         for (var i in _resource.resources) {
           if (_resource.resources[i].id === null) {
-            _subContext.injectResource(null, _resource.resources[i].source.text);
+            _subContext.injectResource(null,
+                                       _resource.resources[i].source.text);
           } else {
             _subContext.addResource(_resource.resources[i].id, false);
           }
@@ -1277,10 +1256,8 @@ define(function () {
         function(match, p1, p2, offset, string) {
           if (vars.hasOwnProperty(p2)) {
             return vars[p2];
-          } else {
-            throw "Cannot use the undefined variable: "+p2;
           }
-          return p1;
+          throw "Cannot use the undefined variable: "+p2;
         });
   }
 
@@ -1313,6 +1290,7 @@ define(function () {
       }
       return _expandUrn(res, vars);
     }
+    scheme = scheme.substr(5);
     return _expandUrn(scheme, vars);
   }
 
@@ -1330,6 +1308,43 @@ define(function () {
   this.L20n = L20n;
 
 }).call(this);
+(function() {
+  'use strict';
+
+  this.IO = {
+    loadAsync: function(url) {
+      var deferred = when.defer();
+      var xhr = new XMLHttpRequest();
+      xhr.overrideMimeType('text/plain');
+      xhr.addEventListener('load', function() {
+        if (xhr.status == 200) {
+          deferred.resolve(xhr.responseText);
+        } else {
+          deferred.reject();
+        }
+      });
+      xhr.addEventListener('abort', function(e) {
+        return when.reject(e);
+      });
+      xhr.open('GET', url, true);
+      xhr.send('');
+      return deferred.promise;
+    },
+
+    loadSync: function(url) {
+      var xhr = new XMLHttpRequest();
+      xhr.overrideMimeType('text/plain');
+      xhr.open('GET', url, false);
+      xhr.send('');
+      if (xhr.status == 200) {
+        return xhr.responseText;
+      } else {
+        return false;
+      }
+    }
+  }
+
+}).call(L20n);
 (function() {
   'use strict';
 
@@ -2300,14 +2315,8 @@ define(function () {
     return this;
   }
 
-  if (typeof exports !== 'undefined') {
-    exports.EventEmitter = EventEmitter;
-  } else if (this.L20n) {
-    this.L20n.EventEmitter = EventEmitter;
-  } else {
-    this.L20nEventEmitter = EventEmitter;
-  }
-}).call(this);
+  this.EventEmitter = EventEmitter;
+}).call(L20n);
 // This is L20n's on-the-fly compiler.  It takes the AST produced by the parser 
 // and uses it to create a set of JavaScript objects and functions representing 
 // entities and macros and other expressions.
@@ -3331,15 +3340,7 @@ define(function () {
     return availableLocales;
   }
 
-  var Intl;
-
-  if (typeof exports !== 'undefined') {
-    Intl = exports;
-  } else if (this.L20n) {
-    Intl = this.L20n.Intl = {};
-  } else {
-    Intl = this.L20nIntl = {};
-  }
-
-  Intl.prioritizeLocales = prioritizeLocales;
-}).call(this);
+  this.Intl = {
+    prioritizeLocales: prioritizeLocales
+  };
+}).call(L20n);

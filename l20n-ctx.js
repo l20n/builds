@@ -193,92 +193,84 @@
     // a special Locale for resources not associated with any other
     var _none;
 
+    var _reslinks = [];
+
     var _isFrozen = false;
     var _isReady = false;
     var _emitter = new L20n.EventEmitter();
     var _parser = new L20n.Parser(L20n.EventEmitter);
     var _compiler = new L20n.Compiler(L20n.EventEmitter, L20n.Parser);
 
-    var _globalsManager = new L20n.GlobalsManager();
+    var _retr = new L20n.RetranslationManager();
 
     var _listeners = [];
 
     _parser.addEventListener('error', echo);
     _compiler.addEventListener('error', echo);
-    _compiler.setGlobals(_globalsManager.globals);
+    _compiler.setGlobals(_retr.globals);
 
-    function get(id, data, callback) {
+    function get(id, data) {
       if (!_isReady) {
-        if (!callback) {
-          throw new ContextError("Context not ready");
-        }
-        return this.addEventListener('ready', 
-                                     get.bind(this, id, data, callback));
+        throw new ContextError("Context not ready");
       }
-      var entity = getFromLocale(0, id, data);
-      if (callback) {
-        callback(entity.value);
-        _globalsManager.registerGet({
-          'id': callback,
-          'callback': get.bind(this, id, data, callback),
-          'globals': entity.globals});
-      }
-      return entity.value;
+      return getFromLocale(0, id, data).value;
     }
 
-    function getEntity(id, data, callback) {
+    function getEntity(id, data) {
       if (!_isReady) {
-        if (!callback) {
-          throw new ContextError("Context not ready");
-        }
-        return this.addEventListener('ready', 
-                                     getEntity.bind(this, id, data, callback));
+        throw new ContextError("Context not ready");
       }
-      var entity = getFromLocale(0, id, data);
-      if (callback) {
-        callback(entity);
-        _globalsManager.registerGet({
-          'id': callback,
-          'callback': getEntity.bind(this, id, data, callback),
-          'globals': entity.globals});
-      }
-      return entity;
+      return getFromLocale(0, id, data);
     }
 
     function localize(idsOrTuples, callback) {
       if (!_isReady) {
-        throw new ContextError("Context not ready");
+        if (!callback) {
+          throw new ContextError("Context not ready");
+        }
+        _retr.bindGet({
+          id: callback,
+          callback: getMany.bind(this, idsOrTuples, callback),
+          globals: [],
+        });
+        // XXX: add stop and retranslate to the returned object
+        return {};
       }
       return getMany(idsOrTuples, callback);
     }
 
     function getMany(idsOrTuples, callback) {
       var vals = {};
+      var globalsUsed = {};
+      var id;
       for (var i = 0, iot; iot = idsOrTuples[i]; i++) {
         if (Array.isArray(iot)) {
-          vals[iot[0]] = getEntity(iot[0], iot[1]);
+          id = iot[0];
+          vals[id] = getEntity(iot[0], iot[1]);
         } else {
-          vals[iot] = getEntity(iot);
+          id = iot;
+          vals[id] = getEntity(iot);
+        }
+        for (var global in vals[id].globals) {
+          if (vals[id].globals.hasOwnProperty(global)) {
+            globalsUsed[global] = true;
+          }
         }
       }
-      var globalsUsed = {};
-      Object.keys(vals).forEach(function (key) {
-        Object.keys(vals[key].globals).forEach(function (key2) {
-          globalsUsed[key2] = true;
-        });
-      });
-      var retobj = {
-        'entities': vals,
-        'globals': Object.keys(globalsUsed),
+      var l10n = {
+        entities: vals,
+        //stop: fn
       };
       if (callback) {
-        callback(retobj);
-        _globalsManager.registerGet({
-          'id': callback,
-          'callback': getMany.bind(this, idsOrTuples, callback),
-          'globals': retobj.globals});
+        callback(l10n);
+        _retr.bindGet({
+          id: callback,
+          callback: getMany.bind(this, idsOrTuples, callback),
+          globals: Object.keys(globalsUsed),
+        });
       }
-      return retobj;
+      // XXX: add stop and retranslate to the returned object
+      return {};
     }
 
     function getLocale(i) {
@@ -349,12 +341,8 @@
     }
 
     function addResource(text) {
-      if (_available.length === 0) {
+      if (_none === undefined) {
         _none = new Locale(null, _parser, _compiler);
-      } else {
-        // XXX should addResource add the text to all locales in the multilocale 
-        // mode?  or throw?
-        throw new ContextError("Can't use addResource with registered languages");
       }
       var res = new Resource(null, _parser);
       res.source = text;
@@ -362,6 +350,10 @@
     }
 
     function linkResource(uri) {
+      _reslinks.push(uri);
+    }
+
+    function link(uri) {
       if (typeof uri === 'function') {
         return linkTemplate(uri);
       } else {
@@ -370,9 +362,6 @@
     }
 
     function linkTemplate(uriTemplate) {
-      if (_available.length === 0) {
-        throw new ContextError("No registered languages");
-      }
       for (var lang in _locales) {
         var res = new Resource(uriTemplate(lang), _parser);
         // XXX detect if the resource has been already added?
@@ -387,7 +376,6 @@
         for (var lang in _locales) {
           _locales[lang].resources.push(res);
         }
-        return true;
       }
       if (_none === undefined) {
         _none = new Locale(null, _parser, _compiler);
@@ -397,15 +385,25 @@
     }
 
     function registerLocales() {
+      if (_isFrozen && !_isReady) {
+        throw new ContextError("Context not ready");
+      }
+      _available = [];
       for (var i in arguments) {
         var lang = arguments[i];
         _available.push(lang);
         _locales[lang] = new Locale(lang, _parser, _compiler);
       }
+      if (_isFrozen) {
+        freeze();
+      }
     }
 
     function freeze() {
       _isFrozen = true;
+      for (var i = 0; i < _reslinks.length; i++) {
+        link(_reslinks[i]);
+      }
       var locale = _available.length > 0 ? _locales[_available[0]] : _none;
       return locale.build(true).then(setReady);
     }
@@ -413,6 +411,7 @@
     function setReady() {
       _isReady = true;
       _emitter.emit('ready');
+      _retr.retranslate();
     }
 
     function addEventListener(type, listener) {
@@ -1581,46 +1580,50 @@ this.L20n.Promise = Promise;
 }).call(this);
 (function(){
   'use strict';
-/**
- *
- * We want to set the listener on resize and timeout on hour only if
- * there's some use case so after first get() probably.
- *
- * Question is - do we want to track use of the global and stop the listeners
- * if we stop using the global? How to track that?
- *
- **/
 
-var GlobalsManager = function() {
-  var _entries = {};
+function RetranslationManager() {
   var _usage = [];
   var _counter = {};
+  var _callbacks = [];
 
-  this.registerGlobal = registerGlobal;
-  this.registerGet = registerGet;
-  this.globals = _entries;
+  this.bindGet = bindGet;
+  this.retranslate = retranslate;
+  this.globals = {};
 
-  for (var i in GlobalsManager._constructors) {
-    registerGlobal(GlobalsManager._constructors[i]);
+  for (var i in RetranslationManager._constructors) {
+    initGlobal.call(this, RetranslationManager._constructors[i]);
   }
 
-  function registerGlobal(globalCtor) {
+  function initGlobal(globalCtor) {
     var global = new globalCtor();
-    _entries[global.id] = global;
+    this.globals[global.id] = global;
     _counter[global.id] = 0; 
     global.addEventListener('change', function(id) {
       for (var i = 0; i < _usage.length; i++) {
-        if (_usage[i].globals.indexOf(id) !== -1) {
+        if (_usage[i] && _usage[i].globals.indexOf(id) !== -1) {
           _usage[i].callback();
         }  
       }
     });
   };
 
-  function registerGet(get) {
+  function bindGet(get) {
+    // store the callback in case we want to retranslate the whole context
+    var inCallbacks;
+    for (var i = 0; i < _callbacks.length; i++) {
+      if (_callbacks[i].id === get.id) {
+        inCallbacks = true;
+        break;
+      }
+    }
+    if (!inCallbacks) {
+      _callbacks.push(get);
+    }
+
+    // handle the global usage
     var inUsage = null;
     for (var usageInc = 0; usageInc < _usage.length; usageInc++) {
-      if (_usage[usageInc].id === get.id) {
+      if (_usage[usageInc] && _usage[usageInc].id === get.id) {
         inUsage = _usage[usageInc];
         break;
       }
@@ -1630,8 +1633,8 @@ var GlobalsManager = function() {
         _usage.push(get);
         get.globals.forEach(function(id) {
           _counter[id]++;
-          _entries[id].activate();
-        });
+          this.globals[id].activate();
+        }, this);
       }
     } else {
       if (get.globals.length == 0) {
@@ -1642,30 +1645,36 @@ var GlobalsManager = function() {
         });
         added.forEach(function(id) {
           _counter[id]++;
-          _entries[id].activate();
-        });
+          this.globals[id].activate();
+        }, this);
         var removed = inUsage.globals.filter(function(id) {
           return get.globals.indexOf(id) === -1;
         });
         removed.forEach(function(id) {
           _counter[id]--;
           if (_counter[id] == 0) {
-            _entries[id].deactivate();
+            this.globals[id].deactivate();
           }
         });
         inUsage.globals = get.globals;
       }
     }
   }
+
+  function retranslate() {
+    for (var i = 0; i < _callbacks.length; i++) {
+      _callbacks[i].callback();
+    }
+  }
 }
 
-GlobalsManager._constructors = [];
+RetranslationManager._constructors = [];
 
-GlobalsManager.registerGlobal = function(ctor) {
-  GlobalsManager._constructors.push(ctor);
+RetranslationManager.registerGlobal = function(ctor) {
+  RetranslationManager._constructors.push(ctor);
 }
 
-var Global = function() {
+function Global() {
   this.id = null;
   this._emitter = new L20n.EventEmitter();
 }
@@ -1680,19 +1689,14 @@ Global.prototype.addEventListener = function(type, listener) {
 Global.prototype.activate = function() {}
 Global.prototype.deactivate = function() {}
 
-GlobalsManager.Global = Global;
-
-L20n.GlobalsManager = GlobalsManager;
+RetranslationManager.Global = Global;
 
 
-/**
- * Warning, we're cheating here for now.
- * We want to have @screen.width, but since we can't
- * get it from compiler, we call it @screen and in order
- * to keep API forward-compatible with 1.0 we return 
- * an object with key width to make it callable as @screen.width
- */
-var ScreenWidthGlobal = function() {
+// XXX: Warning, we're cheating here for now. We want to have @screen.width,
+// but since we can't get it from compiler, we call it @screen and in order to
+// keep API forward-compatible with 1.0 we return an object with key width to
+// make it callable as @screen.width
+function ScreenGlobal() {
   Global.call(this);
   this.id = 'screen';
   this.get = get;
@@ -1726,11 +1730,11 @@ var ScreenWidthGlobal = function() {
   }
 }
 
-ScreenWidthGlobal.prototype = Object.create(Global.prototype);
-ScreenWidthGlobal.prototype.constructor = ScreenWidthGlobal;
+ScreenGlobal.prototype = Object.create(Global.prototype);
+ScreenGlobal.prototype.constructor = ScreenGlobal;
 
 
-var OSGlobal = function() {
+function OSGlobal() {
   Global.call(this);
   this.id = 'os';
   this.get = get;
@@ -1753,7 +1757,7 @@ var OSGlobal = function() {
 OSGlobal.prototype = Object.create(Global.prototype);
 OSGlobal.prototype.constructor = OSGlobal;
 
-var HourGlobal = function() {
+function HourGlobal() {
   Global.call(this);
   this.id = 'hour';
   this.get = get;
@@ -1804,9 +1808,11 @@ var HourGlobal = function() {
 HourGlobal.prototype = Object.create(Global.prototype);
 HourGlobal.prototype.constructor = HourGlobal;
 
-GlobalsManager.registerGlobal(ScreenWidthGlobal);
-GlobalsManager.registerGlobal(OSGlobal);
-GlobalsManager.registerGlobal(HourGlobal);
+RetranslationManager.registerGlobal(ScreenGlobal);
+RetranslationManager.registerGlobal(OSGlobal);
+RetranslationManager.registerGlobal(HourGlobal);
+
+this.L20n.RetranslationManager = RetranslationManager;
 
 }).call(this);
 (function() {

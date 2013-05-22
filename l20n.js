@@ -1,12 +1,252 @@
-(function() {
+(function(window, undefined) {
+
+function define(name, deps, payload) {
+  define.modules[name] = payload;
+};
+
+// un-instantiated modules
+define.modules = {};
+// instantiated modules
+define.exports = {};
+
+function normalize(path) {
+  var parts = path.split('/');
+  var normalized = [];
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] == '.') {
+      // don't add it to `normalized`
+    } else if (parts[i] == '..') {
+      normalized.pop();
+    } else {
+      normalized.push(parts[i]);
+    }
+  }
+  return normalized.join('/');
+}
+
+function join(a, b) {
+  return a ? a.trim().replace(/\/*$/, '/') + b.trim() : b.trim();
+}
+
+function dirname(path) {
+  return path ? path.split('/').slice(0, -1).join('/') : null;
+}
+
+function req(leaf, name) {
+  name = normalize(join(dirname(leaf), name));
+  if (name in define.exports) {
+    return define.exports[name];
+  }
+  if (!(name in define.modules)) {
+    throw new Error("Module not defined: " + name);
+  }
+
+  var module = define.modules[name];
+  if (typeof module == "function") {
+    var exports = {};
+    var reply = module(req.bind(null, name), exports, { id: name, uri: "" });
+    module = (reply !== undefined) ? reply : exports;
+  }
+  return define.exports[name] = module;
+};
+
+// for the top-level required modules, leaf is null
+var require = req.bind(null, null);
+define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l20n/platform/io', 'l20n/platform/intl'], function(require, exports, module) {
   'use strict';
 
-  var L20n = {
-    Context: Context,
-    getContext: function L20n_getContext(id) {
+  var L20n = require('../l20n');
+  var Promise = require('./promise').Promise;
+  var io = require('./platform/io');
+
+  var localizeHandler;
+  var localizeBodyHandler;
+  var ctx = L20n.getContext(document.location.host);
+
+  var documentLocalized = false;
+
+  bootstrap();
+
+  function bootstrap() {
+    var headNode = document.head;
+    var data = headNode.querySelector('script[type="application/l10n-data+json"]');
+    if (data) {
+      ctx.data = JSON.parse(data.textContent);
+    }
+    var scripts = headNode.querySelectorAll('script[type="application/l20n"]');
+    if (scripts.length) {
+      for (var i = 0; i < scripts.length; i++) {
+        if (scripts[i].hasAttribute('src')) {
+          ctx.linkResource(scripts[i].getAttribute('src'));
+        } else {
+          ctx.addResource(scripts[i].textContent);
+        }
+      }
+      loadResources();
+    } else {
+      var link = headNode.querySelector('link[rel="localization"]');
+      if (link) {
+        // XXX add errback
+        loadManifest(link.getAttribute('href')).then(loadResources);
+      } else {
+        console.warn("L20n: No resources found. (Put them above l20n.js.)");
+      }
+    }
+    document.addEventListener('readystatechange', collectNodes);
+  }
+
+  function localizeBody(nodes) {
+    localizeHandler = ctx.localize(nodes.ids, function(l10n) {
+      if (!nodes) {
+        nodes = getNodes(document.body);
+      }
+      for (var i = 0; i < nodes.nodes.length; i++) {
+        translateNode(nodes.nodes[i],
+          nodes.ids[i],
+          l10n.entities[nodes.ids[i]]);
+      }
+      nodes = null;
+      if (!documentLocalized) {
+        fireLocalizedEvent();
+        documentLocalized = true;
+      }
+    });
+    ctx.removeEventListener('ready', localizeBodyHandler);
+  }
+
+  function collectNodes() {
+    // this function is fired right when we have document.body available
+    //
+    // We collect the nodes and then we check if the l10n context is ready.
+    // If it is ready, we create localize block for it, if not
+    // we set an event listener on context and add it when it's ready.
+    var nodes = getNodes(document.body);
+
+
+    if (ctx.isReady) {
+      localizeBody(nodes);
+    } else {
+      localizeBodyHandler = localizeBody.bind(this, nodes);
+      ctx.addEventListener('ready', localizeBodyHandler);
+    }
+    document.removeEventListener('readystatechange', collectNodes);
+  }
+
+  function loadResources() {
+    ctx.freeze();
+
+    ctx.addEventListener('error', console.warn);
+    document.l10n = ctx;
+    document.l10n.localizeNode = function localizeNode(node) {
+      var nodes = getNodes(node);
+      var many = localizeHandler.extend(nodes.ids);
+      for (var i = 0; i < nodes.nodes.length; i++) {
+        translateNode(nodes.nodes[i], nodes.ids[i],
+                      many.entities[nodes.ids[i]]);
+      }
+    };
+  }
+
+  function initializeManifest(manifest) {
+    var re = /{{\s*lang\s*}}/;
+    var Intl = require('./platform/intl').Intl;
+    /**
+     * For now we just take nav.language, but we'd prefer to get
+     * a list of locales that the user can read sorted by user's preference
+     **/
+    var langList = Intl.prioritizeLocales(manifest.languages,
+                                          [navigator.language]);
+    ctx.registerLocales.apply(ctx, langList);
+    manifest.resources.forEach(function(uri) {
+      if (re.test(uri)) {
+        ctx.linkResource(uri.replace.bind(uri, re));
+      } else {
+        ctx.linkResource(uri);
+      }
+    });
+  }
+
+  function loadManifest(url) {
+    var deferred = new Promise();
+    io.loadAsync(url).then(
+      function(text) {
+        var manifest = JSON.parse(text);
+        initializeManifest(manifest);
+        deferred.fulfill();
+      }
+    );
+    return deferred;
+  }
+
+  function fireLocalizedEvent() {
+    var event = document.createEvent('Event');
+    event.initEvent('DocumentLocalized', false, false);
+    document.dispatchEvent(event);
+  }
+
+  function getNodes(node) {
+    var nodes = node.querySelectorAll('[data-l10n-id]');
+    var ids = [];
+    if (node.hasAttribute('data-l10n-id')) {
+      // include the root node in nodes (and ids)
+      nodes = Array.prototype.slice.call(nodes);
+      nodes.push(node);
+    }
+    for (var i = 0; i < nodes.length; i++) {
+      ids.push(nodes[i].getAttribute('data-l10n-id'));
+    }
+    return {
+      ids: ids,
+      nodes: nodes
+    };
+  }
+
+  function translateNode(node, id, entity) {
+    if (!entity) {
+      return;
+    }
+    if (entity.value) {
+      node.textContent = entity.value;
+    }
+    for (key in entity.attributes) {
+      node.setAttribute(key, entity.attributes[key]);
+    }
+    // readd data-l10n-attrs
+    // readd data-l10n-overlay
+    // secure attribute access
+  }
+
+  // same as exports = L20n;
+  return L20n;
+
+});
+define('l20n', ['require', 'exports', 'module' ,  'l20n/context', 'l20n/parser', 'l20n/compiler'], function(require, exports, module) {
+  'use strict';
+
+  var Context = require('./l20n/context').Context;
+  var Parser = require('./l20n/parser').Parser;
+  var Compiler = require('./l20n/compiler').Compiler;
+
+  exports.Context = Context;
+  exports.Parser = Parser;
+  exports.Compiler = Compiler;
+  exports.getContext = function L20n_getContext(id) {
       return new Context(id);
-    },
   };
+
+});
+define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/parser', 'l20n/compiler', 'l20n/promise', 'l20n/retranslation', 'l20n/platform/globals', 'l20n/platform/io'], function(require, exports, module) {
+  'use strict';
+
+  var EventEmitter = require('./events').EventEmitter;
+  var Parser = require('./parser').Parser;
+  var Compiler = require('./compiler').Compiler;
+  var Promise = require('./promise').Promise;
+  var RetranslationManager = require('./retranslation').RetranslationManager;
+
+  // register globals with RetranslationManager
+  require('./platform/globals');
+  var io = require('./platform/io');
 
   function Resource(id, parser) {
     var self = this;
@@ -43,17 +283,25 @@
 
     function fetch(async) {
       if (!async) {
-        if (!self.source) {
-          self.source = L20n.IO.loadSync(self.id);
+        if (self.source) {
+          return self.source;
         }
-        return;
+        try {
+          return self.source = io.loadSync(self.id);
+        } catch(e) {
+          if (e instanceof io.Error) {
+            return self.source = '';
+          } else {
+            throw e;
+          }
+        }
       }
       if (self.source) {
-        var source = new L20n.Promise();
+        var source = new Promise();
         source.fulfill();
         return source;
       }
-      return L20n.IO.loadAsync(self.id).then(function load_success(text) {
+      return io.loadAsync(self.id).then(function load_success(text) {
         self.source = text;
       });
     }
@@ -83,7 +331,7 @@
       });
 
       if (async) {
-        return L20n.Promise.all(imports_built);
+        return Promise.all(imports_built);
       }
     }
 
@@ -126,6 +374,7 @@
 
     this.build = build;
     this.getEntry = getEntry;
+    this.hasResource = hasResource;
 
     var self = this;
 
@@ -147,7 +396,7 @@
         resources_built.push(res.build(0, async));
       });
       if (async) {
-        return L20n.Promise.all(resources_built);
+        return Promise.all(resources_built);
       }
     }
 
@@ -168,12 +417,19 @@
       }
       return undefined;
     }
+
+    function hasResource(uri) { 
+      return this.resources.some(function(res) {
+        return res.id === uri;
+      });
+    }
   }
 
   function Context(id) {
 
     this.id = id;
     this.data = {};
+    this.isReady = false;
 
     this.addResource = addResource;
     this.linkResource = linkResource;
@@ -196,12 +452,11 @@
     var _reslinks = [];
 
     var _isFrozen = false;
-    var _isReady = false;
-    var _emitter = new L20n.EventEmitter();
-    var _parser = new L20n.Parser(L20n.EventEmitter);
-    var _compiler = new L20n.Compiler(L20n.EventEmitter, L20n.Parser);
+    var _emitter = new EventEmitter();
+    var _parser = new Parser();
+    var _compiler = new Compiler();
 
-    var _retr = new L20n.RetranslationManager();
+    var _retr = new RetranslationManager();
 
     var _listeners = [];
 
@@ -210,67 +465,95 @@
     _compiler.setGlobals(_retr.globals);
 
     function get(id, data) {
-      if (!_isReady) {
+      if (!this.isReady) {
         throw new ContextError("Context not ready");
       }
-      return getFromLocale(0, id, data).value;
+      return getFromLocale.call(this, 0, id, data).value;
     }
 
     function getEntity(id, data) {
-      if (!_isReady) {
+      if (!this.isReady) {
         throw new ContextError("Context not ready");
       }
-      return getFromLocale(0, id, data);
+      return getFromLocale.call(this, 0, id, data);
     }
 
-    function localize(idsOrTuples, callback) {
-      if (!_isReady) {
-        if (!callback) {
-          throw new ContextError("Context not ready");
-        }
-        _retr.bindGet({
-          id: callback,
-          callback: getMany.bind(this, idsOrTuples, callback),
-          globals: [],
-        });
-        // XXX: add stop and retranslate to the returned object
-        return {};
+    function localize(ids, callback) {
+      if (!callback) {
+        throw new ContextError("No callback passed");
       }
-      return getMany(idsOrTuples, callback);
+      return bindLocalize.call(this, ids, callback);
     }
 
-    function getMany(idsOrTuples, callback) {
-      var vals = {};
-      var globalsUsed = {};
-      var id;
-      for (var i = 0, iot; iot = idsOrTuples[i]; i++) {
-        if (Array.isArray(iot)) {
-          id = iot[0];
-          vals[id] = getEntity(iot[0], iot[1]);
-        } else {
-          id = iot;
-          vals[id] = getEntity(iot);
-        }
-        for (var global in vals[id].globals) {
-          if (vals[id].globals.hasOwnProperty(global)) {
-            globalsUsed[global] = true;
+    function bindLocalize(ids, callback, reason) {
+
+      var bound = {
+        // stop: fn
+        extend: function extend(newIds) { 
+          for (var i = 0; i < newIds.length; i++) {
+            if (ids.indexOf(newIds[i]) === -1) {
+              ids.push(newIds[i]);
+            }
           }
-        }
+          if (!this.isReady) {
+            return;
+          }
+          var newMany = getMany.call(this, newIds);
+          // rebind the callback in `_retr`: append new globals seen used in 
+          // `newIds` and overwrite the callback with a new one which has the 
+          // updated `ids`
+          _retr.bindGet({
+            id: callback,
+            callback: bindLocalize.bind(this, ids, callback),
+            globals: Object.keys(newMany.globalsUsed)
+          }, true);
+          return newMany;
+        }.bind(this)
       }
-      var l10n = {
-        entities: vals,
-        //stop: fn
-      };
-      if (callback) {
-        callback(l10n);
+
+
+      // if the ctx isn't ready, bind the callback and return
+      if (!this.isReady) {
         _retr.bindGet({
           id: callback,
-          callback: getMany.bind(this, idsOrTuples, callback),
-          globals: Object.keys(globalsUsed),
+          callback: bindLocalize.bind(this, ids, callback),
+          globals: []
         });
+        return bound;
       }
-      // XXX: add stop and retranslate to the returned object
-      return {};
+
+      // if the ctx is ready, retrieve the entities
+      var many = getMany.call(this, ids);
+      var l10n = {
+        entities: many.entities,
+        reason: reason
+        // stop: fn
+      };
+      _retr.bindGet({
+        id: callback,
+        callback: bindLocalize.bind(this, ids, callback),
+        globals: Object.keys(many.globalsUsed)
+      });
+      // callback may call bound.extend which will rebind it if needed;  for 
+      // this to work it needs to be called after _retr.bindGet above;  
+      // otherwise bindGet would listen to globals passed initially in 
+      // many.globalsUsed
+      callback(l10n);
+      return bound;
+    }
+
+    function getMany(ids) {
+      var many = {
+        entities: {},
+        globalsUsed: {}
+      }
+      for (var i = 0, id; id = ids[i]; i++) {
+        many.entities[id] = getEntity.call(this, id);
+        for (var global in many.entities[id].globals) {
+          many.globalsUsed[global] = true;
+        }
+      }
+      return many;
     }
 
     function getLocale(i) {
@@ -304,16 +587,17 @@
       // if the entry is missing, just go to the next locale immediately
       if (entry === undefined) {
         _emitter.emit('error', new EntityError("Not found", id, locale.id));
-        return getFromLocale(cur + 1, id, data, sourceString);
+        return getFromLocale.call(this, cur + 1, id, data, sourceString);
       }
 
       // otherwise, try to get the value of the entry
       try {
-        return entry.get(getArgs.bind(this, data));
+        return entry.get(getArgs.call(this, data));
       } catch(e) {
-        if (e instanceof L20n.Compiler.RuntimeError) {
+        if (e instanceof Compiler.RuntimeError) {
           _emitter.emit('error', new EntityError(e.message, id, locale.id));
-          return getFromLocale(cur + 1, id, data, sourceString || e.source);
+          return getFromLocale.call(this, cur + 1, id, data, 
+                                    sourceString || e.source);
         } else {
           throw e;
         }
@@ -326,15 +610,11 @@
       }
       var args = {};
       for (var i in this.data) {
-        if (this.data.hasOwnProperty(i)) {
-          args[i] = this.data[i];
-        }
+        args[i] = this.data[i];
       }
       if (data) {
         for (i in data) {
-          if (data.hasOwnProperty(i)) {
-            args[i] = data[i];
-          }
+          args[i] = data[i];
         }
       }
       return args;
@@ -363,9 +643,10 @@
 
     function linkTemplate(uriTemplate) {
       for (var lang in _locales) {
-        var res = new Resource(uriTemplate(lang), _parser);
-        // XXX detect if the resource has been already added?
-        _locales[lang].resources.push(res);
+        var uri = uriTemplate(lang);
+        if (!_locales[lang].hasResource(uri)) {
+          _locales[lang].resources.push(new Resource(uri, _parser));
+        }
       }
       return true;
     }
@@ -374,28 +655,34 @@
       var res = new Resource(uri, _parser);
       if (_available.length !== 0) {
         for (var lang in _locales) {
-          _locales[lang].resources.push(res);
+          if (!_locales[lang].hasResource(uri)) {
+            _locales[lang].resources.push(res);
+          }
         }
       }
       if (_none === undefined) {
         _none = new Locale(null, _parser, _compiler);
       }
-      _none.resources.push(res);
+      if (!_none.hasResource(uri)) {
+        _none.resources.push(res);
+      }
       return true;
     }
 
     function registerLocales() {
-      if (_isFrozen && !_isReady) {
+      if (_isFrozen && !this.isReady) {
         throw new ContextError("Context not ready");
       }
       _available = [];
       for (var i in arguments) {
         var lang = arguments[i];
         _available.push(lang);
-        _locales[lang] = new Locale(lang, _parser, _compiler);
+        if (!(lang in _locales)) {
+          _locales[lang] = new Locale(lang, _parser, _compiler);
+        }
       }
       if (_isFrozen) {
-        freeze();
+        freeze.call(this);
       }
     }
 
@@ -405,13 +692,17 @@
         link(_reslinks[i]);
       }
       var locale = _available.length > 0 ? _locales[_available[0]] : _none;
-      return locale.build(true).then(setReady);
+      if (locale.isReady) {
+        return setReady.call(this);
+      } else {
+        return locale.build(true).then(setReady.bind(this));
+      }
     }
 
     function setReady() {
-      _isReady = true;
+      this.isReady = true;
+      _retr.all(_available);
       _emitter.emit('ready');
-      _retr.retranslate();
     }
 
     function addEventListener(type, listener) {
@@ -461,195 +752,56 @@
   GetError.prototype = Object.create(ContextError.prototype);
   GetError.prototype.constructor = GetError;
 
-  this.L20n = L20n;
+  exports.Context = Context;
 
-}).call(this);
-/**
- * @class A promise - value to be resolved in the future.
- * Implements the "Promises/A+" specification.
- */
-(function() {
+});
+define('l20n/events', ['require', 'exports', 'module' , ], function(require, exports, module) {
   'use strict';
-var Promise = function() {
-	this._state = 0; /* 0 = pending, 1 = fulfilled, 2 = rejected */
-	this._value = null; /* fulfillment / rejection value */
 
-	this._cb = {
-		fulfilled: [],
-		rejected: []
-	}
-
-	this._thenPromises = []; /* promises returned by then() */
-}
-
-Promise.all = function(list) {
-  var pr = new Promise();
-  var toResolve = list.length;
-  if (toResolve == 0) {
-    pr.fulfill();
-    return pr;
+  function EventEmitter() {
+    this._listeners = {};
   }
-  function onResolve() {
-    toResolve--;
-    if (toResolve == 0) {
-      pr.fulfill();
+
+  EventEmitter.prototype.emit = function ee_emit() {
+    var args = Array.prototype.slice.call(arguments);
+    var type = args.shift();
+    var typeListeners = this._listeners[type];
+    if (!typeListeners || !typeListeners.length) {
+      return false;
     }
+    typeListeners.forEach(function(listener) {
+      listener.apply(this, args);
+    }, this);
+    return true;
   }
-  for (var idx in list) {
-    // XXX should there be a different callback for promises errorring out?
-    // with two onResolve callbacks, all() is more like some().
-    list[idx].then(onResolve, onResolve);
+
+  EventEmitter.prototype.addEventListener = function ee_add(type, listener) {
+    if (!this._listeners[type]) {
+      this._listeners[type] = [];
+    }
+    this._listeners[type].push(listener);
+    return this;
   }
-  return pr;
-}
 
-/**
- * @param {function} onFulfilled To be called once this promise gets fulfilled
- * @param {function} onRejected To be called once this promise gets rejected
- * @returns {Promise}
- */
-Promise.prototype.then = function(onFulfilled, onRejected) {
-	this._cb.fulfilled.push(onFulfilled);
-	this._cb.rejected.push(onRejected);
+  EventEmitter.prototype.removeEventListener = function ee_remove(type, listener) {
+    var typeListeners = this._listeners[type];
+    var pos = typeListeners.indexOf(listener);
+    if (pos === -1) {
+      return this;
+    }
+    typeListeners.splice(pos, 1);
+    return this;
+  }
 
-	var thenPromise = new Promise();
+  exports.EventEmitter = EventEmitter;
 
-	this._thenPromises.push(thenPromise);
-
-	if (this._state > 0) {
-		setTimeout(this._processQueue.bind(this), 0);
-	}
-
-	/* 3.2.6. then must return a promise. */
-	return thenPromise; 
-}
-
-/**
- * Fulfill this promise with a given value
- * @param {any} value
- */
-Promise.prototype.fulfill = function(value) {
-	if (this._state != 0) { return this; }
-
-	this._state = 1;
-	this._value = value;
-
-	this._processQueue();
-
-	return this;
-}
-
-/**
- * Reject this promise with a given value
- * @param {any} value
- */
-Promise.prototype.reject = function(value) {
-	if (this._state != 0) { return this; }
-
-	this._state = 2;
-	this._value = value;
-
-	this._processQueue();
-
-	return this;
-}
-
-Promise.prototype._processQueue = function() {
-	while (this._thenPromises.length) {
-		var onFulfilled = this._cb.fulfilled.shift();
-		var onRejected = this._cb.rejected.shift();
-		this._executeCallback(this._state == 1 ? onFulfilled : onRejected);
-	}
-}
-
-Promise.prototype._executeCallback = function(cb) {
-	var thenPromise = this._thenPromises.shift();
-
-	if (typeof(cb) != "function") {
-		if (this._state == 1) {
-			/* 3.2.6.4. If onFulfilled is not a function and promise1 is fulfilled, promise2 must be fulfilled with the same value. */
-			thenPromise.fulfill(this._value);
-		} else {
-			/* 3.2.6.5. If onRejected is not a function and promise1 is rejected, promise2 must be rejected with the same reason. */
-			thenPromise.reject(this._value);
-		}
-		return;
-	}
-
-	try {
-		var returned = cb(this._value);
-
-		if (returned && typeof(returned.then) == "function") {
-			/* 3.2.6.3. If either onFulfilled or onRejected returns a promise (call it returnedPromise), promise2 must assume the state of returnedPromise */
-			var fulfillThenPromise = function(value) { thenPromise.fulfill(value); }
-			var rejectThenPromise = function(value) { thenPromise.reject(value); }
-			returned.then(fulfillThenPromise, rejectThenPromise);
-		} else {
-			/* 3.2.6.1. If either onFulfilled or onRejected returns a value that is not a promise, promise2 must be fulfilled with that value. */ 
-			thenPromise.fulfill(returned);
-		}
-
-	} catch (e) {
-
-		/* 3.2.6.2. If either onFulfilled or onRejected throws an exception, promise2 must be rejected with the thrown exception as the reason. */
-		thenPromise.reject(e); 
-
-	}
-}
-
-this.L20n.Promise = Promise;
-}).call(this);
-(function() {
+});
+define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], function(require, exports, module) {
   'use strict';
 
-  var IO = {
-    load: function load(url, async) {
-      if (async) {
-        return this.loadAsync(url);
-      }
-      return this.loadSync(url);
-    },
-    loadAsync: function(url) {
-      var deferred = new L20n.Promise();
-      var xhr = new XMLHttpRequest();
-      xhr.overrideMimeType('text/plain');
-      xhr.addEventListener('load', function() {
-        if (xhr.status == 200) {
-          deferred.fulfill(xhr.responseText);
-        } else {
-          deferred.reject();
-        }
-      });
-      xhr.addEventListener('abort', function(e) {
-        return deferred.reject(e);
-      });
-      xhr.open('GET', url, true);
-      xhr.send('');
-      return deferred;
-    },
+  var EventEmitter = require('./events').EventEmitter;
 
-    loadSync: function(url) {
-      var deferred = new L20n.Promise();
-      var xhr = new XMLHttpRequest();
-      xhr.overrideMimeType('text/plain');
-      xhr.open('GET', url, false);
-      xhr.send('');
-      if (xhr.status == 200) {
-        return xhr.responseText;
-      } else {
-        // XXX should this fail more horribly?
-        return '';
-      }
-    },
-  }
-
-  this.L20n.IO = IO;
-
-}).call(this);
-(function() {
-  'use strict';
-
-  function Parser(Emitter) {
+  function Parser(throwOnErrors) {
 
     /* Public */
 
@@ -662,13 +814,12 @@ this.L20n.Promise = Promise;
 
     var _source, _index, _length, _emitter;
 
-    /* Depending on if we have emitter choose prop getLOL method */
     var getLOL;
-    if (Emitter) {
-      _emitter = new Emitter();
-      getLOL = getLOLWithRecover;
-    } else {
+    if (throwOnErrors) {
       getLOL = getLOLPlain;
+    } else {
+      _emitter = new EventEmitter();
+      getLOL = getLOLWithRecover;
     }
 
     function getComment() {
@@ -1143,7 +1294,7 @@ this.L20n.Promise = Promise;
       try {
         return getComplexString();
       } catch (e) {
-        if (Emitter && e instanceof ParserError) {
+        if (_emitter && e instanceof ParserError) {
           _emitter.emit('error', e);
         }
         throw e;
@@ -1568,299 +1719,9 @@ this.L20n.Promise = Promise;
   ParserError.prototype = Object.create(Error.prototype);
   ParserError.prototype.constructor = ParserError;
 
-  /* Expose the Parser constructor */
+  exports.Parser = Parser;
 
-  if (typeof exports !== 'undefined') {
-    exports.Parser = Parser;
-  } else if (this.L20n) {
-    this.L20n.Parser = Parser;
-  } else {
-    this.L20nParser = Parser;
-  }
-}).call(this);
-(function(){
-  'use strict';
-
-function RetranslationManager() {
-  var _usage = [];
-  var _counter = {};
-  var _callbacks = [];
-
-  this.bindGet = bindGet;
-  this.retranslate = retranslate;
-  this.globals = {};
-
-  for (var i in RetranslationManager._constructors) {
-    initGlobal.call(this, RetranslationManager._constructors[i]);
-  }
-
-  function initGlobal(globalCtor) {
-    var global = new globalCtor();
-    this.globals[global.id] = global;
-    _counter[global.id] = 0; 
-    global.addEventListener('change', function(id) {
-      for (var i = 0; i < _usage.length; i++) {
-        if (_usage[i] && _usage[i].globals.indexOf(id) !== -1) {
-          _usage[i].callback();
-        }  
-      }
-    });
-  };
-
-  function bindGet(get) {
-    // store the callback in case we want to retranslate the whole context
-    var inCallbacks;
-    for (var i = 0; i < _callbacks.length; i++) {
-      if (_callbacks[i].id === get.id) {
-        inCallbacks = true;
-        break;
-      }
-    }
-    if (!inCallbacks) {
-      _callbacks.push(get);
-    }
-
-    // handle the global usage
-    var inUsage = null;
-    for (var usageInc = 0; usageInc < _usage.length; usageInc++) {
-      if (_usage[usageInc] && _usage[usageInc].id === get.id) {
-        inUsage = _usage[usageInc];
-        break;
-      }
-    }
-    if (!inUsage) {
-      if (get.globals.length != 0) {
-        _usage.push(get);
-        get.globals.forEach(function(id) {
-          _counter[id]++;
-          this.globals[id].activate();
-        }, this);
-      }
-    } else {
-      if (get.globals.length == 0) {
-        delete(_usage[usageInc]);
-      } else {
-        var added = get.globals.filter(function(id) {
-          return inUsage.globals.indexOf(id) === -1;
-        });
-        added.forEach(function(id) {
-          _counter[id]++;
-          this.globals[id].activate();
-        }, this);
-        var removed = inUsage.globals.filter(function(id) {
-          return get.globals.indexOf(id) === -1;
-        });
-        removed.forEach(function(id) {
-          _counter[id]--;
-          if (_counter[id] == 0) {
-            this.globals[id].deactivate();
-          }
-        });
-        inUsage.globals = get.globals;
-      }
-    }
-  }
-
-  function retranslate() {
-    for (var i = 0; i < _callbacks.length; i++) {
-      _callbacks[i].callback();
-    }
-  }
-}
-
-RetranslationManager._constructors = [];
-
-RetranslationManager.registerGlobal = function(ctor) {
-  RetranslationManager._constructors.push(ctor);
-}
-
-function Global() {
-  this.id = null;
-  this._emitter = new L20n.EventEmitter();
-}
-
-Global.prototype.addEventListener = function(type, listener) {
-  if (type !== 'change') {
-    throw "Unknown event type";
-  }
-  this._emitter.addEventListener(type, listener);
-}
-
-Global.prototype.activate = function() {}
-Global.prototype.deactivate = function() {}
-
-RetranslationManager.Global = Global;
-
-
-// XXX: Warning, we're cheating here for now. We want to have @screen.width,
-// but since we can't get it from compiler, we call it @screen and in order to
-// keep API forward-compatible with 1.0 we return an object with key width to
-// make it callable as @screen.width
-function ScreenGlobal() {
-  Global.call(this);
-  this.id = 'screen';
-  this.get = get;
-  this.activate = activate;
-  this.isActive = false;
-
-  var value = null;
-  var self = this;
-
-  function get() {
-    if (!value) {
-      value = document.body.clientWidth;
-    }
-    return {'width': value};
-  }
-
-  function activate() {
-    if (!this.isActive) {
-      window.addEventListener('resize', onchange);
-      this.isActive = true;
-    }
-  }
-
-  function deactivate() {
-    window.removeEventListener('resize', onchange);
-  }
-
-  function onchange() {
-    value = document.body.clientWidth;
-    self._emitter.emit('change', self.id);
-  }
-}
-
-ScreenGlobal.prototype = Object.create(Global.prototype);
-ScreenGlobal.prototype.constructor = ScreenGlobal;
-
-
-function OSGlobal() {
-  Global.call(this);
-  this.id = 'os';
-  this.get = get;
-
-  function get() {
-    if (/^MacIntel/.test(navigator.platform)) {
-      return 'mac';
-    }
-    if (/^Linux/.test(navigator.platform)) {
-      return 'linux';
-    }
-    if (/^Win/.test(navigatgor.platform)) {
-      return 'win';
-    }
-    return 'unknown';
-  }
-
-}
-
-OSGlobal.prototype = Object.create(Global.prototype);
-OSGlobal.prototype.constructor = OSGlobal;
-
-function HourGlobal() {
-  Global.call(this);
-  this.id = 'hour';
-  this.get = get;
-  this.activate = activate;
-  this.deactivate = deactivate;
-  this.isActive = false;
-
-  var self = this;
-  var value = null;
-  var interval = 60 * 60 * 1000;
-  var I = null;
-
-  function get() {
-    if (!value) {
-      var time = new Date();
-      value = time.getHours();
-    }
-    return value;
-  }
-
-  function onchange() {
-    var time = new Date();
-    if (time.getHours() !== value) {
-      value = time.getHours();
-      self._emitter.emit('change', self.id);
-    }
-  }
-
-  function activate() {
-    if (!this.isActive) {
-      var time = new Date();
-      I = setTimeout(function() {
-        onchange();
-        I = setInterval(onchange, interval);
-      }, interval - (time.getTime() % interval));
-      this.isActive = true;
-    }
-  }
-
-  function deactivate() {
-    value = null;
-    clearInterval(I);
-    this.isActive = false;
-  }
-
-}
-
-HourGlobal.prototype = Object.create(Global.prototype);
-HourGlobal.prototype.constructor = HourGlobal;
-
-RetranslationManager.registerGlobal(ScreenGlobal);
-RetranslationManager.registerGlobal(OSGlobal);
-RetranslationManager.registerGlobal(HourGlobal);
-
-this.L20n.RetranslationManager = RetranslationManager;
-
-}).call(this);
-(function() {
-  'use strict';
-
-  function EventEmitter() {
-    this._listeners = {};
-  }
-
-  EventEmitter.prototype.emit = function ee_emit() {
-    var args = Array.prototype.slice.call(arguments);
-    var type = args.shift();
-    var typeListeners = this._listeners[type];
-    if (!typeListeners || !typeListeners.length) {
-      return false;
-    }
-    typeListeners.forEach(function(listener) {
-      listener.apply(this, args);
-    }, this);
-    return true;
-  }
-
-  EventEmitter.prototype.addEventListener = function ee_add(type, listener) {
-    if (!this._listeners[type]) {
-      this._listeners[type] = [];
-    }
-    this._listeners[type].push(listener);
-    return this;
-  }
-
-  EventEmitter.prototype.removeEventListener = function ee_remove(type, listener) {
-    var typeListeners = this._listeners[type];
-    var pos = typeListeners.indexOf(listener);
-    if (pos === -1) {
-      return this;
-    }
-    listeners.splice(pos, 1);
-    return this;
-  }
-
-  if (typeof exports !== 'undefined') {
-    exports.EventEmitter = EventEmitter;
-  } else if (this.L20n) {
-    this.L20n.EventEmitter = EventEmitter;
-  } else {
-    this.L20nEventEmitter = EventEmitter;
-  }
-}).call(this);
+});
 // This is L20n's on-the-fly compiler.  It takes the AST produced by the parser 
 // and uses it to create a set of JavaScript objects and functions representing 
 // entities and macros and other expressions.
@@ -2005,17 +1866,13 @@ this.L20n.RetranslationManager = RetranslationManager;
 // compiler until a primitive value is returned.  This logic lives in the 
 // `_resolve` function.
 
-//
-// Inline comments
-// ---------------
-//
-// Isolate the code by using an immediately-invoked function expression.
-// Invoke it via `(function(){ ... }).call(this)` so that inside of the IIFE, 
-// `this` references the global object.
-(function() {
+define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/parser'], function(require, exports, module) {
   'use strict';
 
-  function Compiler(Emitter, Parser) {
+  var EventEmitter = require('./events').EventEmitter;
+  var Parser = require('./parser').Parser;
+
+  function Compiler() {
 
     // Public
 
@@ -2027,8 +1884,8 @@ this.L20n.RetranslationManager = RetranslationManager;
 
     // Private
 
-    var _emitter = Emitter ? new Emitter() : null;
-    var _parser = Parser ? new Parser() : null;
+    var _emitter = new EventEmitter();
+    var _parser = new Parser(true);
     var _env = {};
     var _globals = {};
     var _references = {
@@ -2064,16 +1921,10 @@ this.L20n.RetranslationManager = RetranslationManager;
     }
 
     function addEventListener(type, listener) {
-      if (!_emitter) {
-        throw Error("Emitter not available");
-      }
       return _emitter.addEventListener(type, listener);
     }
 
     function removeEventListener(type, listener) {
-      if (!_emitter) {
-        throw Error("Emitter not available");
-      }
       return _emitter.removeEventListener(type, listener);
     }
 
@@ -2089,9 +1940,7 @@ this.L20n.RetranslationManager = RetranslationManager;
 
     function emit(ctor, message, entry, source) {
       var e = new ctor(message, entry, source);
-      if (_emitter) {
-        _emitter.emit('error', e);
-      }
+      _emitter.emit('error', e);
       return e;
     }
 
@@ -2144,7 +1993,7 @@ this.L20n.RetranslationManager = RetranslationManager;
         // index, we'll emit an `IndexError` instead.  To avoid duplication, 
         // the `ValueErrors` will only be emitted if it actually made it to 
         // here.  See `HashLiteral` for an example of why it wouldn't make it.
-        if (e instanceof ValueError && _emitter) {
+        if (e instanceof ValueError) {
           _emitter.emit('error', e);
         }
         throw e;
@@ -2194,7 +2043,7 @@ this.L20n.RetranslationManager = RetranslationManager;
         return this._resolve(ctxdata);
       } catch (e) {
         requireCompilerError(e);
-        if (e instanceof ValueError && _emitter) {
+        if (e instanceof ValueError) {
           _emitter.emit('error', e);
         }
         throw e;
@@ -2322,8 +2171,13 @@ this.L20n.RetranslationManager = RetranslationManager;
           throw new RuntimeError('Reference to an unknown global: ' + name,
                                  entry);
         }
+        try {
+          var value = _globals[name].get();
+        } catch (e) {
+          throw new RuntimeError('Cannot evaluate global ' + name, entry);
+        }
         _references.globals[name] = true;
-        return [locals, _globals[name].get()];
+        return [locals, value];
       };
     }
     function NumberLiteral(node, entry) {
@@ -2766,23 +2620,480 @@ this.L20n.RetranslationManager = RetranslationManager;
     }
   }
 
+  exports.Compiler = Compiler;
 
-  // Expose the Compiler constructor
+});
+/*
+ *	Any copyright is dedicated to the Public Domain.
+ *	http://creativecommons.org/publicdomain/zero/1.0/
+ */
 
-  // Depending on the environment the script is run in, define `Compiler` as 
-  // the exports object which can be `required` as a module, or as a member of 
-  // the L20n object defined on the global object in the browser, i.e. 
-  // `window`.
+define('l20n/promise', ['require', 'exports', 'module' , ], function(require, exports, module) {
+  'use strict';
 
-  if (typeof exports !== 'undefined') {
-    exports.Compiler = Compiler;
-  } else if (this.L20n) {
-    this.L20n.Compiler = Compiler;
-  } else {
-    this.L20nCompiler = Compiler;
+  var Promise = function() {
+    this._state = 0; /* 0 = pending, 1 = fulfilled, 2 = rejected */
+    this._value = null; /* fulfillment / rejection value */
+
+    this._cb = {
+      fulfilled: [],
+      rejected: []
+    }
+
+    this._thenPromises = []; /* promises returned by then() */
   }
-}).call(this);
-(function() {
+
+  Promise.all = function(list) {
+    var pr = new Promise();
+    var toResolve = list.length;
+    if (toResolve == 0) {
+      pr.fulfill();
+      return pr;
+    }
+    function onResolve() {
+      toResolve--;
+      if (toResolve == 0) {
+        pr.fulfill();
+      }
+    }
+    for (var idx in list) {
+      // XXX should there be a different callback for promises errorring out?
+      // with two onResolve callbacks, all() is more like some().
+      list[idx].then(onResolve, onResolve);
+    }
+    return pr;
+  }
+
+  /**
+   * @param {function} onFulfilled To be called once this promise gets fulfilled
+   * @param {function} onRejected To be called once this promise gets rejected
+   * @returns {Promise}
+   */
+  Promise.prototype.then = function(onFulfilled, onRejected) {
+    this._cb.fulfilled.push(onFulfilled);
+    this._cb.rejected.push(onRejected);
+
+    var thenPromise = new Promise();
+
+    this._thenPromises.push(thenPromise);
+
+    if (this._state > 0) {
+      setTimeout(this._processQueue.bind(this), 0);
+    }
+
+    // 3.2.6. then must return a promise.
+    return thenPromise; 
+  }
+
+  /**
+   * Fulfill this promise with a given value
+   * @param {any} value
+   */
+  Promise.prototype.fulfill = function(value) {
+    if (this._state != 0) { return this; }
+
+    this._state = 1;
+    this._value = value;
+
+    this._processQueue();
+
+    return this;
+  }
+
+  /**
+   * Reject this promise with a given value
+   * @param {any} value
+   */
+  Promise.prototype.reject = function(value) {
+    if (this._state != 0) { return this; }
+
+    this._state = 2;
+    this._value = value;
+
+    this._processQueue();
+
+    return this;
+  }
+
+  Promise.prototype._processQueue = function() {
+    while (this._thenPromises.length) {
+      var onFulfilled = this._cb.fulfilled.shift();
+      var onRejected = this._cb.rejected.shift();
+      this._executeCallback(this._state == 1 ? onFulfilled : onRejected);
+    }
+  }
+
+  Promise.prototype._executeCallback = function(cb) {
+    var thenPromise = this._thenPromises.shift();
+
+    if (typeof(cb) != "function") {
+      if (this._state == 1) {
+        // 3.2.6.4. If onFulfilled is not a function and promise1 is fulfilled, 
+        // promise2 must be fulfilled with the same value.
+        thenPromise.fulfill(this._value);
+      } else {
+        // 3.2.6.5. If onRejected is not a function and promise1 is rejected, 
+        // promise2 must be rejected with the same reason.
+        thenPromise.reject(this._value);
+      }
+      return;
+    }
+
+    try {
+      var returned = cb(this._value);
+
+      if (returned && typeof(returned.then) == "function") {
+        // 3.2.6.3. If either onFulfilled or onRejected returns a promise (call 
+        // it returnedPromise), promise2 must assume the state of 
+        // returnedPromise
+        var fulfillThenPromise = function(value) { thenPromise.fulfill(value); 
+        }
+        var rejectThenPromise = function(value) { thenPromise.reject(value); }
+        returned.then(fulfillThenPromise, rejectThenPromise);
+      } else {
+        // 3.2.6.1. If either onFulfilled or onRejected returns a value that is 
+        // not a promise, promise2 must be fulfilled with that value.
+        thenPromise.fulfill(returned);
+      }
+
+    } catch (e) {
+
+      // 3.2.6.2. If either onFulfilled or onRejected throws an exception, 
+      // promise2 must be rejected with the thrown exception as the reason.
+      thenPromise.reject(e); 
+
+    }
+  }
+
+  exports.Promise = Promise;
+
+});
+define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], function(require, exports, module) {
+  'use strict';
+
+  var EventEmitter = require('./events').EventEmitter;
+
+  function RetranslationManager() {
+    var _usage = [];
+    var _counter = {};
+    var _callbacks = [];
+
+    this.bindGet = bindGet;
+    this.all = all;
+    this.globals = {};
+
+    for (var i in RetranslationManager._constructors) {
+      initGlobal.call(this, RetranslationManager._constructors[i]);
+    }
+
+    function initGlobal(globalCtor) {
+      var global = new globalCtor();
+      this.globals[global.id] = global;
+      _counter[global.id] = 0; 
+      global.addEventListener('change', function(id) {
+        for (var i = 0; i < _usage.length; i++) {
+          if (_usage[i] && _usage[i].globals.indexOf(id) !== -1) {
+            // invoke the callback with the reason
+            _usage[i].callback({
+              global: global.id
+            });
+          }  
+        }
+      });
+    };
+
+    function bindGet(get, isRebind) {
+      var i;
+      // store the callback in case we want to retranslate the whole context
+      var inCallbacks;
+      for (i = 0; i < _callbacks.length; i++) {
+        if (_callbacks[i].id === get.id) {
+          inCallbacks = true;
+          break;
+        }
+      }
+      if (!inCallbacks) {
+        _callbacks.push(get);
+      } else if (isRebind) {
+        _callbacks[i] = get;
+      }
+
+      // handle the global usage
+      var bound;
+      for (i = 0; i < _usage.length; i++) {
+        if (_usage[i] && _usage[i].id === get.id) {
+          bound = _usage[i];
+          break;
+        }
+      }
+      if (!bound) {
+        // it's the first time we see this get
+        if (get.globals.length != 0) {
+          _usage.push(get);
+          get.globals.forEach(function(id) {
+            _counter[id]++;
+            this.globals[id].activate();
+          }, this);
+        }
+      } else if (isRebind) {
+        // if we rebinding the callback, don't remove globals
+        // because we're just adding new entities to the bind
+        bound.callback = get.callback;
+        var added = get.globals.filter(function(id) {
+          return bound.globals.indexOf(id) === -1;
+        });
+        added.forEach(function(id) {
+          _counter[id]++;
+          this.globals[id].activate();
+        }, this);
+        bound.globals = bound.globals.concat(added);
+      } else if (get.globals.length == 0) {
+        // after a retranslation, no globals were used; remove the callback
+        delete _usage[i];
+      } else {
+        // see which globals were added and which ones were removed
+        var added = get.globals.filter(function(id) {
+          return bound.globals.indexOf(id) === -1;
+        });
+        added.forEach(function(id) {
+          _counter[id]++;
+          this.globals[id].activate();
+        }, this);
+        var removed = bound.globals.filter(function(id) {
+          return get.globals.indexOf(id) === -1;
+        });
+        removed.forEach(function(id) {
+          _counter[id]--;
+          if (_counter[id] == 0) {
+            this.globals[id].deactivate();
+          }
+        }, this);
+        bound.globals = get.globals;
+      }
+    }
+
+    function all(locales) {
+      for (var i = 0; i < _callbacks.length; i++) {
+        // invoke the callback with the reason
+        _callbacks[i].callback({
+          locales: locales
+        });
+      }
+    }
+  }
+
+  RetranslationManager._constructors = [];
+
+  RetranslationManager.registerGlobal = function(ctor) {
+    RetranslationManager._constructors.push(ctor);
+  }
+
+  exports.RetranslationManager = RetranslationManager;
+
+});
+define('l20n/platform/globals', ['require', 'exports', 'module' , 'l20n/events', 'l20n/retranslation'], function(require, exports, module) {
+  'use strict';
+
+  var EventEmitter = require('../events').EventEmitter;
+  var RetranslationManager = require('../retranslation').RetranslationManager;
+
+  function Global() {
+    this.id = null;
+    this._emitter = new EventEmitter();
+    this.value = null;
+    this.isActive = false;
+  }
+
+  Global.prototype._get = function _get() {
+    throw new Error('Not implemented');
+  }
+
+  Global.prototype.get = function get() {
+    // invalidate the cached value if the global is not active;  active 
+    // globals handle `value` automatically in `onchange()`
+    if (!this.value || !this.isActive) {
+      this.value = this._get();
+    }
+    return this.value;
+  }
+
+  Global.prototype.addEventListener = function(type, listener) {
+    if (type !== 'change') {
+      throw "Unknown event type";
+    }
+    this._emitter.addEventListener(type, listener);
+  }
+
+
+  // XXX: https://bugzilla.mozilla.org/show_bug.cgi?id=865226
+  // We want to have @screen.width, but since we can't get it from compiler, we 
+  // call it @screen and in order to keep API forward-compatible with 1.0 we 
+  // return an object with key width to
+  // make it callable as @screen.width
+  function ScreenGlobal() {
+    Global.call(this);
+    this.id = 'screen';
+    this._get = _get;
+    this.activate = activate;
+    this.deactivate = deactivate;
+
+    var self = this;
+
+    function _get() {
+      return {
+        width: document.body.clientWidth
+      }
+    }
+
+    function activate() {
+      if (!this.isActive) {
+        window.addEventListener('resize', onchange);
+        this.isActive = true;
+      }
+    }
+
+    function deactivate() {
+      window.removeEventListener('resize', onchange);
+      this.value = null;
+      this.isActive = false;
+    }
+
+    function onchange() {
+      self.value = {
+        width: document.body.clientWidth
+      }
+      self._emitter.emit('change', self.id);
+    }
+  }
+
+  ScreenGlobal.prototype = Object.create(Global.prototype);
+  ScreenGlobal.prototype.constructor = ScreenGlobal;
+
+
+  function OSGlobal() {
+    Global.call(this);
+    this.id = 'os';
+    this.get = get;
+
+    function get() {
+      if (/^MacIntel/.test(navigator.platform)) {
+        return 'mac';
+      }
+      if (/^Linux/.test(navigator.platform)) {
+        return 'linux';
+      }
+      if (/^Win/.test(navigatgor.platform)) {
+        return 'win';
+      }
+      return 'unknown';
+    }
+
+  }
+
+  OSGlobal.prototype = Object.create(Global.prototype);
+  OSGlobal.prototype.constructor = OSGlobal;
+
+  function HourGlobal() {
+    Global.call(this);
+    this.id = 'hour';
+    this._get = _get;
+    this.activate = activate;
+    this.deactivate = deactivate;
+
+    var self = this;
+    var interval = 60 * 60 * 1000;
+    var I = null;
+
+    function _get() {
+      var time = new Date();
+      return time.getHours();
+    }
+
+    function onchange() {
+      var time = new Date();
+      if (time.getHours() !== self.value) {
+        self.value = time.getHours();
+        self._emitter.emit('change', self.id);
+      }
+    }
+
+    function activate() {
+      if (!this.isActive) {
+        var time = new Date();
+        I = setTimeout(function() {
+          onchange();
+          I = setInterval(onchange, interval);
+        }, interval - (time.getTime() % interval));
+        this.isActive = true;
+      }
+    }
+
+    function deactivate() {
+      clearInterval(I);
+      this.value = null;
+      this.isActive = false;
+    }
+
+  }
+
+  HourGlobal.prototype = Object.create(Global.prototype);
+  HourGlobal.prototype.constructor = HourGlobal;
+
+  RetranslationManager.registerGlobal(ScreenGlobal);
+  RetranslationManager.registerGlobal(OSGlobal);
+  RetranslationManager.registerGlobal(HourGlobal);
+
+  exports.Global = Global;
+
+});
+define('l20n/platform/io', ['require', 'exports', 'module' , 'l20n/promise'], function(require, exports, module) {
+  'use strict';
+
+  var Promise = require('../promise').Promise;
+
+  exports.loadAsync = function loadAsync(url) {
+    var deferred = new Promise();
+    var xhr = new XMLHttpRequest();
+    xhr.overrideMimeType('text/plain');
+    xhr.addEventListener('load', function() {
+      if (xhr.status == 200) {
+        deferred.fulfill(xhr.responseText);
+      } else {
+        var ex = new IOError('Not found: ' + url);
+        deferred.reject(ex);
+      }
+    });
+    xhr.addEventListener('abort', function(e) {
+      return deferred.reject(e);
+    });
+    xhr.open('GET', url, true);
+    xhr.send('');
+    return deferred;
+  };
+
+  exports.loadSync = function loadSync(url) {
+    var xhr = new XMLHttpRequest();
+    xhr.overrideMimeType('text/plain');
+    xhr.open('GET', url, false);
+    xhr.send('');
+    if (xhr.status == 200) {
+      return xhr.responseText;
+    } else {
+      throw new IOError('Not found: ' + url);
+    }
+  };
+
+  function IOError(message) {
+    this.name = 'IOError';
+    this.message = message;
+  }
+  IOError.prototype = Object.create(Error.prototype);
+  IOError.prototype.constructor = IOError;
+
+  exports.Error = IOError;
+
+});
+define('l20n/platform/intl', ['require', 'exports', 'module' ], function(require, exports, module) {
   'use strict';
 
   var data = {
@@ -2966,12 +3277,7 @@ this.L20n.RetranslationManager = RetranslationManager;
    *
    * returns the list of availableLocales sorted by user preferred locales
    **/
-  function prioritizeLocales(availableLocales) {
-    /**
-     * For now we just take nav.language, but we'd prefer to get
-     * a list of locales that the user can read sorted by user's preference
-     **/
-    var requestedLocales = [navigator.language || navigator.userLanguage];
+  function prioritizeLocales(availableLocales, requestedLocales) {
     var options = {'localeMatcher': 'lookup'};
     var tag = resolveLocale(availableLocales,
                             requestedLocales, options);
@@ -2986,141 +3292,16 @@ this.L20n.RetranslationManager = RetranslationManager;
     return availableLocales;
   }
 
-  this.L20n.Intl = {
+  exports.Intl = {
     prioritizeLocales: prioritizeLocales
   };
-}).call(this);
-(function(){
-  'use strict';
-  var ctx = this.L20n.getContext(document.location.host);
-  var headNode;
-  if (document.body) {
-    document.body.style.visibility = 'hidden';
-  }
 
-  function bootstrap() {
-    headNode = document.head;
-    var data = headNode.querySelector('script[type="application/l10n-data+json"]');
+});
+// attach the L20n singleton to the global object
+window.L20n = require('l20n');
 
-    if (data) {
-      ctx.data = JSON.parse(data.textContent);
-    }
+// hook up the HTML bindings
+require('l20n/html');
 
-    var script = headNode.querySelector('script[type="application/l20n"]');
-    if (script) {
-      if (script.hasAttribute('src')) {
-        ctx.linkResource(script.getAttribute('src'));
-      } else {
-        ctx.addResource(script.textContent);
-      }
-      initializeDocumentContext();
-    } else {
-      var link = headNode.querySelector('link[rel="localization"]');
-      if (link) {
-        loadManifest(link.getAttribute('href')).then(
-          initializeDocumentContext
-        );
-      }
-    }
-    return true;
-  }
-
-  bootstrap();
-
-  function initializeDocumentContext() {
-    localizeDocument();
-
-    ctx.addEventListener('ready', function() {
-      var event = document.createEvent('Event');
-      event.initEvent('LocalizationReady', false, false);
-      document.dispatchEvent(event);
-    });
-
-    ctx.addEventListener('error', function(e) {
-      if (e.code & L20n.NOVALIDLOCALE_ERROR) {
-        var event = document.createEvent('Event');
-        event.initEvent('LocalizationFailed', false, false);
-        document.dispatchEvent(event);
-      }
-    });
-
-    ctx.freeze();
-  }
-
-  function loadManifest(url) {
-    var deferred = new L20n.Promise();
-    L20n.IO.load(url, true).then(
-      function(text) {
-        var manifest = JSON.parse(text);
-        var langList = L20n.Intl.prioritizeLocales(manifest.languages);
-        ctx.registerLocales.apply(this, langList);
-        ctx.linkResource(function(lang) {
-          return manifest.resources[0].replace("{{lang}}", lang);
-        });
-        deferred.fulfill();
-      }
-    );
-    return deferred;
-  }
-
-  function fireLocalizedEvent() {
-    document.body.style.visibility = 'visible';
-    var event = document.createEvent('Event');
-    event.initEvent('DocumentLocalized', false, false);
-    document.dispatchEvent(event);
-  }
-
-  function onDocumentBodyReady() {
-    if (document.readyState === 'interactive') {
-      localizeNode(document);
-      fireLocalizedEvent();
-      document.removeEventListener('readystatechange', onDocumentBodyReady);
-    }
-  }
-
-  function localizeDocument() {
-    if (document.body) {
-      localizeNode(document);
-      fireLocalizedEvent();
-    } else {
-      document.addEventListener('readystatechange', onDocumentBodyReady);
-    }
-    HTMLDocument.prototype.__defineGetter__('l10n', function() {
-      return ctx;
-    });
-  }
-
-  function retranslate(node, l10n) {
-    var nodes = node.querySelectorAll('[data-l10n-id]');
-    var entity;
-    for (var i = 0; i < nodes.length; i++) {
-      var id = nodes[i].getAttribute('data-l10n-id');
-      var entity = l10n.entities[id];
-      var node = nodes[i];
-      if (entity.value) {
-        node.textContent = entity.value;
-      }
-      for (var key in entity.attributes) {
-        node.setAttribute(key, entity.attributes[key]);
-      }
-    }
-    // readd data-l10n-attrs
-    // readd data-l10n-overlay
-    // secure attribute access
-  }
-
-  function localizeNode(node) {
-    var nodes = node.querySelectorAll('[data-l10n-id]');
-    var ids = [];
-    for (var i = 0; i < nodes.length; i++) {
-      if (nodes[i].hasAttribute('data-l10n-args')) {
-        ids.push([nodes[i].getAttribute('data-l10n-id'),
-                  JSON.parse(nodes[i].getAttribute('data-l10n-args'))]);
-      } else {
-        ids.push(nodes[i].getAttribute('data-l10n-id'));
-      }
-    }
-    ctx.localize(ids, retranslate.bind(this, node));
-  }
-
-}).call(this);
+// close the function defined in build/prefix/microrequire.js
+})(window);

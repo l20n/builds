@@ -1,6 +1,6 @@
 (function(window, undefined) {
 
-function define(name, deps, payload) {
+function define(name, payload) {
   define.modules[name] = payload;
 };
 
@@ -52,7 +52,7 @@ function req(leaf, name) {
 
 // for the top-level required modules, leaf is null
 var require = req.bind(null, null);
-define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l20n/platform/io', 'l20n/platform/intl'], function(require, exports, module) {
+define('l20n/html', function(require, exports, module) {
   'use strict';
 
   var L20n = require('../l20n');
@@ -60,8 +60,12 @@ define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l
   var io = require('./platform/io');
 
   var localizeHandler;
-  var localizeBodyHandler;
   var ctx = L20n.getContext(document.location.host);
+
+  // http://www.w3.org/International/questions/qa-scripts
+  // XXX: bug 884308
+  // each localization should decide which direction it wants to use
+  var rtlLocales = ['ar', 'fa', 'he', 'ps', 'ur'];
 
   var documentLocalized = false;
 
@@ -82,62 +86,61 @@ define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l
           ctx.addResource(scripts[i].textContent);
         }
       }
-      loadResources();
+      ctx.freeze();
     } else {
       var link = headNode.querySelector('link[rel="localization"]');
       if (link) {
         // XXX add errback
-        loadManifest(link.getAttribute('href')).then(loadResources);
+        loadManifest(link.getAttribute('href')).then(ctx.freeze.bind(ctx));
       } else {
         console.warn("L20n: No resources found. (Put them above l20n.js.)");
       }
     }
-    document.addEventListener('readystatechange', collectNodes);
+
+    if (document.readyState !== 'loading') {
+      collectNodes();
+    } else {
+      document.addEventListener('readystatechange', collectNodes);
+    }
+    bindPublicAPI();
   }
 
-  function localizeBody(nodes) {
-    localizeHandler = ctx.localize(nodes.ids, function(l10n) {
+  function collectNodes() {
+    var nodes = getNodes(document.body);
+    localizeHandler = ctx.localize(nodes.ids, function localizeHandler(l10n) {
       if (!nodes) {
         nodes = getNodes(document.body);
       }
       for (var i = 0; i < nodes.nodes.length; i++) {
         translateNode(nodes.nodes[i],
-          nodes.ids[i],
-          l10n.entities[nodes.ids[i]]);
+                      nodes.ids[i],
+                      l10n.entities[nodes.ids[i]]);
       }
+
+      // 'locales in l10n.reason mean that localize has been
+      // called because of locale change
+      if ('locales' in l10n.reason && l10n.reason.locales.length) {
+        document.documentElement.lang = l10n.reason.locales[0];
+        document.documentElement.dir =
+          rtlLocales.indexOf(l10n.reason.locales[0]) === -1 ? 'ltr' : 'rtl';
+      }
+
       nodes = null;
       if (!documentLocalized) {
-        fireLocalizedEvent();
         documentLocalized = true;
+        fireLocalizedEvent();
       }
     });
-    ctx.removeEventListener('ready', localizeBodyHandler);
-  }
 
-  function collectNodes() {
-    // this function is fired right when we have document.body available
-    //
-    // We collect the nodes and then we check if the l10n context is ready.
-    // If it is ready, we create localize block for it, if not
-    // we set an event listener on context and add it when it's ready.
-    var nodes = getNodes(document.body);
-
-
-    if (ctx.isReady) {
-      localizeBody(nodes);
-    } else {
-      localizeBodyHandler = localizeBody.bind(this, nodes);
-      ctx.addEventListener('ready', localizeBodyHandler);
-    }
+    // TODO this might fail; silence the error
     document.removeEventListener('readystatechange', collectNodes);
   }
 
-  function loadResources() {
-    ctx.freeze();
-
+  function bindPublicAPI() {
     ctx.addEventListener('error', console.warn);
-    document.l10n = ctx;
-    document.l10n.localizeNode = function localizeNode(node) {
+    ctx.addEventListener('debug', console.error);
+
+    ctx.localizeNode = function localizeNode(node) {
       var nodes = getNodes(node);
       var many = localizeHandler.extend(nodes.ids);
       for (var i = 0; i < nodes.nodes.length; i++) {
@@ -145,18 +148,31 @@ define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l
                       many.entities[nodes.ids[i]]);
       }
     };
+    ctx.once = function once(callback) {
+      if (documentLocalized) {
+        callback();
+      } else {
+        var callAndRemove = function callAndRemove() {
+          document.removeEventListener('DocumentLocalized', callAndRemove);
+          callback();
+        }
+        document.addEventListener('DocumentLocalized', callAndRemove);
+      }
+    }
+    document.l10n = ctx;
   }
 
   function initializeManifest(manifest) {
-    var re = /{{\s*lang\s*}}/;
-    var Intl = require('./platform/intl').Intl;
+    var re = /{{\s*locale\s*}}/;
+    var Intl = require('./intl').Intl;
     /**
      * For now we just take nav.language, but we'd prefer to get
      * a list of locales that the user can read sorted by user's preference
      **/
-    var langList = Intl.prioritizeLocales(manifest.languages,
-                                          [navigator.language]);
-    ctx.registerLocales.apply(ctx, langList);
+    var locList = Intl.prioritizeLocales(manifest.locales,
+                                         [navigator.language],
+                                         manifest.default_locale);
+    ctx.registerLocales.apply(ctx, locList);
     manifest.resources.forEach(function(uri) {
       if (re.test(uri)) {
         ctx.linkResource(uri.replace.bind(uri, re));
@@ -166,11 +182,32 @@ define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l
     });
   }
 
+  function relativeToManifest(manifestUrl, url) {
+    if (url[0] == '/') {
+      return url;
+    }
+    var dirs = manifestUrl.split('/')
+                          .slice(0, -1)
+                          .concat(url.split('/'))
+                          .filter(function(elem) {
+                            return elem !== '.';
+                          });
+
+    if (dirs[0] !== '' && dirs[0] !== '..') {
+      // if the manifest path doesn't start with / or ..
+      dirs.unshift('.');
+    }
+
+    return dirs.join('/');
+  }
+
   function loadManifest(url) {
     var deferred = new Promise();
     io.loadAsync(url).then(
       function(text) {
         var manifest = JSON.parse(text);
+        manifest.resources = manifest.resources.map(
+                               relativeToManifest.bind(this, url));
         initializeManifest(manifest);
         deferred.fulfill();
       }
@@ -205,22 +242,101 @@ define('l20n/html', ['require', 'exports', 'module' , 'l20n', 'l20n/promise', 'l
     if (!entity) {
       return;
     }
-    if (entity.value) {
-      node.textContent = entity.value;
-    }
-    for (key in entity.attributes) {
+    for (var key in entity.attributes) {
       node.setAttribute(key, entity.attributes[key]);
     }
+    if (entity.value) {
+      if (node.hasAttribute('data-l10n-overlay')) {
+        overlayNode(node, entity.value);
+      } else {
+        node.textContent = entity.value;
+      }
+    }
     // readd data-l10n-attrs
-    // readd data-l10n-overlay
     // secure attribute access
+  }
+
+  function overlayNode(node, value) {
+    // This code operates on three DOMFragments:
+    //
+    // node - the fragment that is currently attached to the document
+    //
+    // sourceNode - in retranslation case, we need to store the original
+    // node from before translation, in order to properly apply path matchings
+    //
+    // l10nNode - new fragment that takes the l10n value and applies attributes
+    // from the sourceNode for matching nodes
+
+    var sourceNode = node._l20nSourceNode || node;
+    var l10nNode = sourceNode.cloneNode(false);
+
+    l10nNode.innerHTML = value;
+
+    var children = l10nNode.getElementsByTagName('*');
+    for (var i = 0, child; child = children[i]; i++) {
+      var path = getPathTo(child, l10nNode);
+      var sourceChild = getElementByPath(path, sourceNode);
+      if (!sourceChild) {
+        continue;
+      }
+
+      for (var k = 0, sourceAttr; sourceAttr = sourceChild.attributes[k]; k++) {
+        if (!child.hasAttribute(sourceAttr.name)) {
+          child.setAttribute(sourceAttr.nodeName, sourceAttr.value);
+        }
+      }
+    }
+
+    l10nNode._l20nSourceNode = sourceNode;
+    node.parentNode.replaceChild(l10nNode, node);
+    return;
+  }
+
+
+  function getPathTo(element, context) {
+    var TYPE_ELEMENT = 1;
+
+    if (element === context) {
+      return '.';
+    }
+
+    var id = element.getAttribute('id');
+    if (id) {
+      return '*[@id="' + id + '"]';
+    }
+
+    var l10nPath = element.getAttribute('data-l10n-path');
+    if (l10nPath) {
+      element.removeAttribute('data-l10n-path');
+      return l10nPath;
+    }
+
+    var index = 0;
+    var siblings = element.parentNode.childNodes;
+    for (var i = 0, sibling; sibling = siblings[i]; i++) {
+      if (sibling === element) {
+        var pathToParent = getPathTo(element.parentNode, context);
+        return pathToParent + '/' + element.tagName + '[' + (index + 1) + ']';
+      }
+      if (sibling.nodeType === TYPE_ELEMENT && sibling.tagName === element.tagName) {
+        index++;
+      }
+    }
+
+    throw "Can't find the path to element " + element;
+  }
+
+  function getElementByPath(path, context) {
+    var xpe = document.evaluate(path, context, null,
+                                XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    return xpe.singleNodeValue;
   }
 
   // same as exports = L20n;
   return L20n;
 
 });
-define('l20n', ['require', 'exports', 'module' ,  'l20n/context', 'l20n/parser', 'l20n/compiler'], function(require, exports, module) {
+define('l20n', function(require, exports, module) {
   'use strict';
 
   var Context = require('./l20n/context').Context;
@@ -235,7 +351,7 @@ define('l20n', ['require', 'exports', 'module' ,  'l20n/context', 'l20n/parser',
   };
 
 });
-define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/parser', 'l20n/compiler', 'l20n/promise', 'l20n/retranslation', 'l20n/platform/globals', 'l20n/platform/io'], function(require, exports, module) {
+define('l20n/context', function(require, exports, module) {
   'use strict';
 
   var EventEmitter = require('./events').EventEmitter;
@@ -257,7 +373,7 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
     this.isReady = false;
     this.ast = {
       type: 'LOL',
-      body: [],
+      body: []
     };
 
     this.build = build;
@@ -368,7 +484,7 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
     this.entries = null;
     this.ast = {
       type: 'LOL',
-      body: [],
+      body: []
     };
     this.isReady = false;
 
@@ -429,7 +545,6 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
 
     this.id = id;
     this.data = {};
-    this.isReady = false;
 
     this.addResource = addResource;
     this.linkResource = linkResource;
@@ -439,18 +554,24 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
     this.get = get;
     this.getEntity = getEntity;
     this.localize = localize;
+    this.ready = ready;
 
     this.addEventListener = addEventListener;
     this.removeEventListener = removeEventListener;
 
     // all languages registered as available (list of codes)
     var _available = [];
-    var _locales = {};
-    // a special Locale for resources not associated with any other
-    var _none;
+    // Locale objects corresponding to the registered languages
+    var _locales = {
+      // a special Locale for resources not associated with any other
+      __none__: undefined
+    };
 
+    // URLs or text of resources (with information about the type) added via 
+    // linkResource and addResource
     var _reslinks = [];
 
+    var _isReady = false;
     var _isFrozen = false;
     var _emitter = new EventEmitter();
     var _parser = new Parser();
@@ -459,30 +580,38 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
     var _retr = new RetranslationManager();
 
     var _listeners = [];
+    var self = this;
 
-    _parser.addEventListener('error', echo);
-    _compiler.addEventListener('error', echo);
+    _parser.addEventListener('error', echo.bind(null, 'error'));
+    _compiler.addEventListener('error', echo.bind(null, 'error'));
     _compiler.setGlobals(_retr.globals);
 
     function get(id, data) {
-      if (!this.isReady) {
+      if (!_isReady) {
         throw new ContextError("Context not ready");
       }
-      return getFromLocale.call(this, 0, id, data).value;
+      return getFromLocale.call(self, 0, id, data).value;
     }
 
     function getEntity(id, data) {
-      if (!this.isReady) {
+      if (!_isReady) {
         throw new ContextError("Context not ready");
       }
-      return getFromLocale.call(this, 0, id, data);
+      return getFromLocale.call(self, 0, id, data);
     }
 
     function localize(ids, callback) {
       if (!callback) {
         throw new ContextError("No callback passed");
       }
-      return bindLocalize.call(this, ids, callback);
+      return bindLocalize.call(self, ids, callback);
+    }
+
+    function ready(callback) {
+      if (_isReady) {
+        setTimeout(callback);
+      }
+      addEventListener('ready', callback);
     }
 
     function bindLocalize(ids, callback, reason) {
@@ -495,7 +624,7 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
               ids.push(newIds[i]);
             }
           }
-          if (!this.isReady) {
+          if (!_isReady) {
             return;
           }
           var newMany = getMany.call(this, newIds);
@@ -513,7 +642,7 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
 
 
       // if the ctx isn't ready, bind the callback and return
-      if (!this.isReady) {
+      if (!_isReady) {
         _retr.bindGet({
           id: callback,
           callback: bindLocalize.bind(this, ids, callback),
@@ -556,16 +685,8 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
       return many;
     }
 
-    function getLocale(i) {
-      // if we're out of locales from `_available`, resort to `_none`
-      if (_available.length - i == 0) {
-        return _none;
-      }
-      return  _locales[_available[i]];
-    }
-
     function getFromLocale(cur, id, data, sourceString) {
-      var locale = getLocale(cur);
+      var locale = _locales[_available[cur]];
 
       if (!locale) {
         var ex = new GetError("Entity couldn't be retrieved", id, _available);
@@ -574,7 +695,8 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
         return {
           value: sourceString ? sourceString : id,
           attributes: {},
-          globals: {}
+          globals: {},
+          locale: null
         };
       }
 
@@ -592,7 +714,7 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
 
       // otherwise, try to get the value of the entry
       try {
-        return entry.get(getArgs.call(this, data));
+        var value = entry.get(getArgs.call(this, data));
       } catch(e) {
         if (e instanceof Compiler.RuntimeError) {
           _emitter.emit('error', new EntityError(e.message, id, locale.id));
@@ -602,6 +724,8 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
           throw e;
         }
       }
+      value.locale = locale.id;
+      return value;
     }
 
     function getArgs(data) {
@@ -621,87 +745,118 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
     }
 
     function addResource(text) {
-      if (_none === undefined) {
-        _none = new Locale(null, _parser, _compiler);
+      if (_isFrozen) {
+        throw new ContextError("Context is frozen");
       }
+      _reslinks.push(['text', text]);
+    }
+
+    function add(text, locale) {
       var res = new Resource(null, _parser);
       res.source = text;
-      _none.resources.push(res);
+      locale.resources.push(res);
     }
 
     function linkResource(uri) {
-      _reslinks.push(uri);
+      if (_isFrozen) {
+        throw new ContextError("Context is frozen");
+      }
+      _reslinks.push([typeof uri === 'function' ? 'template' : 'uri', uri]);
     }
 
-    function link(uri) {
-      if (typeof uri === 'function') {
-        return linkTemplate(uri);
-      } else {
-        return linkURI(uri);
+    function link(uri, locale) {
+      if (!locale.hasResource(uri)) {
+        var res = new Resource(uri, _parser);
+        locale.resources.push(res);
       }
-    }
-
-    function linkTemplate(uriTemplate) {
-      for (var lang in _locales) {
-        var uri = uriTemplate(lang);
-        if (!_locales[lang].hasResource(uri)) {
-          _locales[lang].resources.push(new Resource(uri, _parser));
-        }
-      }
-      return true;
-    }
-
-    function linkURI(uri) {
-      var res = new Resource(uri, _parser);
-      if (_available.length !== 0) {
-        for (var lang in _locales) {
-          if (!_locales[lang].hasResource(uri)) {
-            _locales[lang].resources.push(res);
-          }
-        }
-      }
-      if (_none === undefined) {
-        _none = new Locale(null, _parser, _compiler);
-      }
-      if (!_none.hasResource(uri)) {
-        _none.resources.push(res);
-      }
-      return true;
     }
 
     function registerLocales() {
-      if (_isFrozen && !this.isReady) {
+      if (_isFrozen && !_isReady) {
         throw new ContextError("Context not ready");
       }
       _available = [];
-      for (var i in arguments) {
-        var lang = arguments[i];
-        _available.push(lang);
-        if (!(lang in _locales)) {
-          _locales[lang] = new Locale(lang, _parser, _compiler);
+      // _available should remain empty if:
+      //   1. there are no arguments passed, or
+      //   2. the only argument is null
+      if (!(arguments[0] === null && arguments.length === 1)) {
+        for (var i in arguments) {
+          var loc = arguments[i];
+          if (typeof loc !== 'string') {
+            throw new ContextError("Language codes must be strings");
+          }
+          _available.push(loc);
+          if (!(loc in _locales)) {
+            _locales[loc] = new Locale(loc, _parser, _compiler);
+          }
         }
       }
       if (_isFrozen) {
-        freeze.call(this);
+        freeze();
       }
     }
 
     function freeze() {
-      _isFrozen = true;
-      for (var i = 0; i < _reslinks.length; i++) {
-        link(_reslinks[i]);
+      if (_isFrozen && !_isReady) {
+        throw new ContextError("Context not ready");
       }
-      var locale = _available.length > 0 ? _locales[_available[0]] : _none;
+
+      _isFrozen = true;
+
+      // is the contex empty?
+      if (_reslinks.length == 0) {
+        throw new ContextError("Context has no resources");
+      }
+
+      // if no locales have been registered, create a __none__ locale for the 
+      // single-locale mode
+      if (_available.length === 0) {
+        _locales.__none__ = new Locale(null, _parser, _compiler);
+        _available.push('__none__');
+      }
+      
+      // add & link all resources to the available locales
+      for (var i = 0; i < _available.length; i++) {
+        var locale = _locales[_available[i]];
+        for (var j = 0; j < _reslinks.length; j++) {
+          var res = _reslinks[j];
+          if (res[0] === 'text') {
+            // a resource added via addResource(String)
+            add(res[1], locale);
+          } else if (res[0] === 'uri') {
+            // a resource added via linkResource(String)
+            link(res[1], locale);
+          } else {
+            // a resource added via linkResource(Function);  the function 
+            // passed is a URL template and it takes the current locale's code 
+            // as an argument;  if the current locale doesn't have a code (it's 
+            // __none__), we can't call the template function correctly.
+            if (locale.id) {
+              link(res[1](locale.id), locale);
+            } else {
+              throw new ContextError("No registered locales");
+            }
+          }
+        }
+      }
+
+      var locale = _locales[_available[0]];
       if (locale.isReady) {
-        return setReady.call(this);
+        return setReady();
       } else {
-        return locale.build(true).then(setReady.bind(this));
+        return locale.build(true)
+          .then(setReady)
+          // if setReady throws, don't silence the error but emit it instead
+          .then(null, echo.bind(null, 'debug'));
       }
     }
 
     function setReady() {
-      this.isReady = true;
-      _retr.all(_available);
+      _isReady = true;
+      var currentLocales = _available.filter(function(loc){
+        return loc !== '__none__';
+      });
+      _retr.all(currentLocales);
       _emitter.emit('ready');
     }
 
@@ -713,8 +868,8 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
       _emitter.removeEventListener(type, listener);
     }
 
-    function echo(e) {
-      _emitter.emit('error', e);
+    function echo(type, e) {
+      _emitter.emit(type, e);
     }
 }
 
@@ -728,25 +883,25 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
   ContextError.prototype = Object.create(Error.prototype);
   ContextError.prototype.constructor = ContextError;
 
-  function EntityError(message, id, lang) {
+  function EntityError(message, id, loc) {
     ContextError.call(this, message);
     this.name = 'EntityError';
     this.id = id;
-    this.lang = lang;
-    this.message = '[' + lang + '] ' + id + ': ' + message;
+    this.locale = loc;
+    this.message = (loc ? '[' + loc + '] ' : '') + id + ': ' + message;
   }
   EntityError.prototype = Object.create(ContextError.prototype);
   EntityError.prototype.constructor = EntityError;
 
-  function GetError(message, id, langs) {
+  function GetError(message, id, locs) {
     ContextError.call(this, message);
     this.name = 'GetError';
     this.id = id;
-    this.tried = langs;
-    if (langs.length) {
-      this.message = id + ': ' + message + '; tried ' + langs.join(', ');
-    } else {
+    this.tried = locs;
+    if (locs[0] === '__none__') {
       this.message = id + ': ' + message;
+    } else {
+      this.message = id + ': ' + message + '; tried ' + locs.join(', ');
     }
   }
   GetError.prototype = Object.create(ContextError.prototype);
@@ -755,7 +910,7 @@ define('l20n/context', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/p
   exports.Context = Context;
 
 });
-define('l20n/events', ['require', 'exports', 'module' , ], function(require, exports, module) {
+define('l20n/events', function(require, exports, module) {
   'use strict';
 
   function EventEmitter() {
@@ -765,13 +920,13 @@ define('l20n/events', ['require', 'exports', 'module' , ], function(require, exp
   EventEmitter.prototype.emit = function ee_emit() {
     var args = Array.prototype.slice.call(arguments);
     var type = args.shift();
-    var typeListeners = this._listeners[type];
-    if (!typeListeners || !typeListeners.length) {
+    if (!this._listeners[type]) {
       return false;
     }
-    typeListeners.forEach(function(listener) {
-      listener.apply(this, args);
-    }, this);
+    var typeListeners = this._listeners[type].slice();
+    for (var i = 0; i < typeListeners.length; i++) {
+      typeListeners[i].apply(this, args);
+    }
     return true;
   }
 
@@ -796,7 +951,7 @@ define('l20n/events', ['require', 'exports', 'module' , ], function(require, exp
   exports.EventEmitter = EventEmitter;
 
 });
-define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], function(require, exports, module) {
+define('l20n/parser', function(require, exports, module) {
   'use strict';
 
   var EventEmitter = require('./events').EventEmitter;
@@ -841,7 +996,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
       var attr, ws1, ch;
  
       while (true) {
-        attr = getKVPWithIndex();
+        attr = getKVPWithIndex('Attribute');
         attr.local = attr.key.name.charAt(0) === '_';
         attrs.push(attr);
         ws1 = getRequiredWS();
@@ -905,14 +1060,16 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
       }
 
       var defItem, hi, comma, hash = [];
+      var hasDefItem = false;
       while (true) {
         defItem = false;
         if (_source.charAt(_index) === '*') {
           ++_index;
-          if (defItem) {
+          if (hasDefItem) {
             throw error('Default item redefinition forbidden');
           }
           defItem = true;
+          hasDefItem = true;
         }
         hi = getKVP('HashItem');
         hi['default'] = defItem;
@@ -949,7 +1106,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
       while (close !== -1 &&
              _source.charCodeAt(close - 1) === 92 &&
              _source.charCodeAt(close - 2) !== 92) {
-        close = _source.indexOf(opchar, close + len);
+        close = _source.indexOf(opchar, close + 1);
       }
       if (close === -1) {
         throw error('Unclosed string literal');
@@ -959,7 +1116,12 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
       _index = close + len;
       return {
         type: 'String',
-        content: str
+        content: str,
+        // we don't care about escaped cases here;  they are rare enough.
+        // if there is no {{ at all, it's definitely not a complex string.
+        // if there's a \{{, it's not complex either, but we will learn that 
+        // lazily in parseString
+        isNotComplex: str.indexOf('{{') === -1 || undefined
       };
     }
 
@@ -1017,7 +1179,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
 
       // a-zA-Z_
       if ((cc < 97 || cc > 122) && (cc < 65 || cc > 90) && cc !== 95) {
-        throw error('Identifier has to start with [a-zA-Z]');
+        throw error('Identifier has to start with [a-zA-Z_]');
       }
 
       cc = source.charCodeAt(++index);
@@ -1027,7 +1189,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
              cc === 95) {               // _
         cc = source.charCodeAt(++index);
       }
-      _index += index - start;
+      _index = index;
       return {
         type: 'Identifier',
         name: source.slice(start, index)
@@ -1081,7 +1243,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
         type: 'Macro',
         id: id,
         args: idlist,
-        expression: exp,
+        expression: exp
       };
     }
 
@@ -1094,11 +1256,10 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
       var value = getValue(true, ch);
       var attrs = [];
       if (value === null) {
-        if (ch !== '>') {
-          attrs = getAttributes();
-        } else {
+        if (ch === '>') {
           throw error('Expected ">"');
         }
+        attrs = getAttributes();
       } else {
         var ws1 = getRequiredWS();
         if (_source.charAt(_index) !== '>') {
@@ -1108,7 +1269,6 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
           attrs = getAttributes();
         }
       }
-      getWS();
 
       // skip '>'
       ++_index;
@@ -1420,7 +1580,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
     }
 
     function getEqualityExpression() {
-      return getPrefixExpression([['='], '=', true],
+      return getPrefixExpression([['=', '!'], '=', true],
                                  'BinaryExpression',
                                  'BinaryOperator',
                                  getRelationalExpression);
@@ -1479,10 +1639,9 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
 
     function getAttributeExpression(idref, computed) {
       if (idref.type !== 'ParenthesisExpression' &&
-          idref.type !== 'CallExpression' &&
           idref.type !== 'Identifier' &&
           idref.type !== 'ThisExpression') {
-        throw error('AttributeExpression must have Identifier, This, Call or Parenthesis as left node');
+        throw error('AttributeExpression must have Identifier, This or Parenthesis as left node');
       }
       var exp;
       if (computed) {
@@ -1866,7 +2025,7 @@ define('l20n/parser', ['require', 'exports', 'module' ,  'l20n/events'], functio
 // compiler until a primitive value is returned.  This logic lives in the 
 // `_resolve` function.
 
-define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/parser'], function(require, exports, module) {
+define('l20n/compiler', function(require, exports, module) {
   'use strict';
 
   var EventEmitter = require('./events').EventEmitter;
@@ -1889,7 +2048,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
     var _env = {};
     var _globals = {};
     var _references = {
-      globals: {},
+      globals: {}
     };
 
     // Public API functions
@@ -1898,7 +2057,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       _env = {};
       var types = {
         Entity: Entity,
-        Macro: Macro,
+        Macro: Macro
       };
       for (var i = 0, entry; entry = ast.body[i]; i++) {
         var constructor = types[entry.type];
@@ -1944,7 +2103,6 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       return e;
     }
 
-
     // The Entity object.
     function Entity(node) {
       this.id = node.id.name;
@@ -1963,7 +2121,12 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
           this.publicAttributes.push(attr.key.name);
         }
       }
-      this.value = Expression(node.value, this, this.index);
+      if (node.value && node.value.isNotComplex) {
+        this.isNotComplex = true;
+        this.value = node.value.content;
+      } else {
+        this.value = Expression(node.value, this, this.index);
+      }
     }
     // Entities are wrappers around their value expression.  _Yielding_ from 
     // the entity is identical to _evaluating_ its value with the appropriate 
@@ -1971,15 +2134,21 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
     // usage.
     Entity.prototype._yield = function E_yield(ctxdata, key) {
       var locals = {
-        __this__: this,
+        __this__: this
       };
+      if (this.isNotComplex) {
+        return [locals, this.value];
+      }
       return this.value(locals, ctxdata, key);
     };
     // Calling `entity._resolve` will _resolve_ its value to a primitive value.  
     // See `ComplexString` for an example usage.
     Entity.prototype._resolve = function E_resolve(ctxdata) {
+      if (this.isNotComplex) {
+        return this.value;
+      }
       var locals = {
-        __this__: this,
+        __this__: this
       };
       return _resolve(this.value, locals, ctxdata);
     };
@@ -2007,7 +2176,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       // accordingly.
       var entity = {
         value: this.getString(ctxdata),
-        attributes: {},
+        attributes: {}
       };
       for (var i = 0, attr; attr = this.publicAttributes[i]; i++) {
         entity.attributes[attr] = this.attributes[attr].getString(ctxdata);
@@ -2023,18 +2192,29 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       for (var i = 0; i < node.index.length; i++) {
         this.index.push(Expression(node.index[i], this));
       }
-      this.value = Expression(node.value, entity, this.index);
+      if (node.value && node.value.isNotComplex) {
+        this.isNotComplex = true;
+        this.value = node.value.content;
+      } else {
+        this.value = Expression(node.value, entity, this.index);
+      }
       this.entity = entity;
     }
     Attribute.prototype._yield = function A_yield(ctxdata, key) {
       var locals = {
-        __this__: this.entity,
+        __this__: this.entity
       };
+      if (this.isNotComplex) {
+        return [locals, this.value];
+      }
       return this.value(locals, ctxdata, key);
     };
     Attribute.prototype._resolve = function A_resolve(ctxdata) {
+      if (this.isNotComplex) {
+        return this.value;
+      }
       var locals = {
-        __this__: this.entity,
+        __this__: this.entity
       };
       return _resolve(this.value, locals, ctxdata);
     };
@@ -2058,7 +2238,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
     }
     Macro.prototype._call = function M_call(ctxdata, args) {
       var locals = {
-        __this__: this,
+        __this__: this
       };
       for (var i = 0; i < this.args.length; i++) {
         locals[this.args[i].id.name] = args[i];
@@ -2091,7 +2271,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       'CallExpression': CallExpression,
       'PropertyExpression': PropertyExpression,
       'AttributeExpression': AttributeExpression,
-      'ParenthesisExpression': ParenthesisExpression,
+      'ParenthesisExpression': ParenthesisExpression
     };
 
     // The 'dispatcher' expression constructor.  Other expression constructors 
@@ -2112,7 +2292,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       return EXPRESSION_TYPES[node.type](node, entry, index);
     }
 
-    function _resolve(expr, locals, ctxdata, index) {
+    function _resolve(expr, locals, ctxdata) {
       // Bail out early if it's a primitive value or `null`.  This is exactly 
       // what we want.
       if (!expr || 
@@ -2151,6 +2331,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       var name = node.id.name;
       return function variableExpression(locals, ctxdata) {
         if (locals.hasOwnProperty(name)) {
+          // locals[name] is already a [locals, value] tuple on its own
           return locals[name];
         }
         if (!ctxdata || !ctxdata.hasOwnProperty(name)) {
@@ -2164,7 +2345,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       var name = node.id.name;
       return function globalsExpression(locals, ctxdata) {
         if (!_globals) {
-          throw new RuntimeError('Globals missing (tried @' + name + ').',
+          throw new RuntimeError('No globals set (tried @' + name + ').',
                                  entry);
         }
         if (!_globals.hasOwnProperty(name)) {
@@ -2205,7 +2386,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
         } catch (e) {
           requireCompilerError(e);
           // only throw, don't emit yet.  If the `ValueError` makes it to 
-          // `toString()` it will be emitted there.  It might, however, be 
+          // `getString()` it will be emitted there.  It might, however, be 
           // cought by `HashLiteral` and changed into a `IndexError`.  See 
           // those Expressions for more docs.
           throw new ValueError(e.message, entry, node.content);
@@ -2394,13 +2575,13 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       };
       if (token == '-') return function substractOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The - operator takes numbers', entry);
+          throw new RuntimeError('The - operator takes two numbers', entry);
         }
         return left - right;
       };
       if (token == '*') return function multiplyOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The * operator takes numbers', entry);
+          throw new RuntimeError('The * operator takes two numbers', entry);
         }
         return left * right;
       };
@@ -2416,6 +2597,9 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
       if (token == '%') return function moduloOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
           throw new RuntimeError('The % operator takes two numbers', entry);
+        }
+        if (right == 0) {
+          throw new RuntimeError('Modulo zero not allowed.', entry);
         }
         return left % right;
       };
@@ -2525,11 +2709,10 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
         // about `locals` here.
         if (typeof parent !== 'function') {
           if (!parent.hasOwnProperty(prop)) {
-            throw new RuntimeError(prop + 
-                                   ' is not defined in the context data',
+            throw new RuntimeError(prop + ' is not defined.',
                                    entry);
           }
-          return [null, parent[prop]];
+          return [locals, parent[prop]];
         }
         return parent(locals, ctxdata, prop);
       }
@@ -2628,7 +2811,7 @@ define('l20n/compiler', ['require', 'exports', 'module' ,  'l20n/events', 'l20n/
  *	http://creativecommons.org/publicdomain/zero/1.0/
  */
 
-define('l20n/promise', ['require', 'exports', 'module' , ], function(require, exports, module) {
+define('l20n/promise', function(require, exports, module) {
   'use strict';
 
   var Promise = function() {
@@ -2768,7 +2951,7 @@ define('l20n/promise', ['require', 'exports', 'module' , ], function(require, ex
   exports.Promise = Promise;
 
 });
-define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], function(require, exports, module) {
+define('l20n/retranslation', function(require, exports, module) {
   'use strict';
 
   var EventEmitter = require('./events').EventEmitter;
@@ -2789,6 +2972,9 @@ define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], 
     function initGlobal(globalCtor) {
       var global = new globalCtor();
       this.globals[global.id] = global;
+      if (!global.activate) {
+        return;
+      }
       _counter[global.id] = 0; 
       global.addEventListener('change', function(id) {
         for (var i = 0; i < _usage.length; i++) {
@@ -2831,6 +3017,9 @@ define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], 
         if (get.globals.length != 0) {
           _usage.push(get);
           get.globals.forEach(function(id) {
+            if (!this.globals[id].activate) {
+              return;
+            }
             _counter[id]++;
             this.globals[id].activate();
           }, this);
@@ -2840,8 +3029,8 @@ define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], 
         // because we're just adding new entities to the bind
         bound.callback = get.callback;
         var added = get.globals.filter(function(id) {
-          return bound.globals.indexOf(id) === -1;
-        });
+          return this.globals[id].activate && bound.globals.indexOf(id) === -1;
+        }, this);
         added.forEach(function(id) {
           _counter[id]++;
           this.globals[id].activate();
@@ -2853,15 +3042,15 @@ define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], 
       } else {
         // see which globals were added and which ones were removed
         var added = get.globals.filter(function(id) {
-          return bound.globals.indexOf(id) === -1;
-        });
+          return this.globals[id].activate && bound.globals.indexOf(id) === -1;
+        }, this);
         added.forEach(function(id) {
           _counter[id]++;
           this.globals[id].activate();
         }, this);
         var removed = bound.globals.filter(function(id) {
-          return get.globals.indexOf(id) === -1;
-        });
+          return this.globals[id].activate && get.globals.indexOf(id) === -1;
+        }, this);
         removed.forEach(function(id) {
           _counter[id]--;
           if (_counter[id] == 0) {
@@ -2891,7 +3080,7 @@ define('l20n/retranslation', ['require', 'exports', 'module' ,  'l20n/events'], 
   exports.RetranslationManager = RetranslationManager;
 
 });
-define('l20n/platform/globals', ['require', 'exports', 'module' , 'l20n/events', 'l20n/retranslation'], function(require, exports, module) {
+define('l20n/platform/globals', function(require, exports, module) {
   'use strict';
 
   var EventEmitter = require('../events').EventEmitter;
@@ -2941,7 +3130,9 @@ define('l20n/platform/globals', ['require', 'exports', 'module' , 'l20n/events',
 
     function _get() {
       return {
-        width: document.body.clientWidth
+        width: {
+          px: document.body.clientWidth
+        }
       }
     }
 
@@ -2959,9 +3150,7 @@ define('l20n/platform/globals', ['require', 'exports', 'module' , 'l20n/events',
     }
 
     function onchange() {
-      self.value = {
-        width: document.body.clientWidth
-      }
+      self.value = _get();
       self._emitter.emit('change', self.id);
     }
   }
@@ -3046,7 +3235,7 @@ define('l20n/platform/globals', ['require', 'exports', 'module' , 'l20n/events',
   exports.Global = Global;
 
 });
-define('l20n/platform/io', ['require', 'exports', 'module' , 'l20n/promise'], function(require, exports, module) {
+define('l20n/platform/io', function(require, exports, module) {
   'use strict';
 
   var Promise = require('../promise').Promise;
@@ -3054,7 +3243,9 @@ define('l20n/platform/io', ['require', 'exports', 'module' , 'l20n/promise'], fu
   exports.loadAsync = function loadAsync(url) {
     var deferred = new Promise();
     var xhr = new XMLHttpRequest();
-    xhr.overrideMimeType('text/plain');
+    if (xhr.overrideMimeType) {
+      xhr.overrideMimeType('text/plain');
+    }
     xhr.addEventListener('load', function() {
       if (xhr.status == 200) {
         deferred.fulfill(xhr.responseText);
@@ -3073,7 +3264,9 @@ define('l20n/platform/io', ['require', 'exports', 'module' , 'l20n/promise'], fu
 
   exports.loadSync = function loadSync(url) {
     var xhr = new XMLHttpRequest();
-    xhr.overrideMimeType('text/plain');
+    if (xhr.overrideMimeType) {
+      xhr.overrideMimeType('text/plain');
+    }
     xhr.open('GET', url, false);
     xhr.send('');
     if (xhr.status == 200) {
@@ -3093,207 +3286,446 @@ define('l20n/platform/io', ['require', 'exports', 'module' , 'l20n/promise'], fu
   exports.Error = IOError;
 
 });
-define('l20n/platform/intl', ['require', 'exports', 'module' ], function(require, exports, module) {
+define('l20n/intl', function(require, exports, module) {
   'use strict';
 
-  var data = {
-    'defaultLocale': 'en-US',
-    'systemLocales': ['en-US']
+  var unicodeLocaleExtensionSequence = "-u(-[a-z0-9]{2,8})+";
+  var unicodeLocaleExtensionSequenceRE = new RegExp(unicodeLocaleExtensionSequence);
+  var unicodeLocaleExtensionSequenceGlobalRE = new RegExp(unicodeLocaleExtensionSequence, "g");
+  var langTagMappings = {};
+  var langSubtagMappings = {};
+  var extlangMappings = {};
+
+  /**
+   * Regular expression defining BCP 47 language tags.
+   *
+   * Spec: RFC 5646 section 2.1.
+   */
+  var languageTagRE = (function () {
+    // RFC 5234 section B.1
+    // ALPHA          =  %x41-5A / %x61-7A   ; A-Z / a-z
+    var ALPHA = "[a-zA-Z]";
+    // DIGIT          =  %x30-39
+    //                        ; 0-9
+    var DIGIT = "[0-9]";
+
+    // RFC 5646 section 2.1
+    // alphanum      = (ALPHA / DIGIT)     ; letters and numbers
+    var alphanum = "(?:" + ALPHA + "|" + DIGIT + ")";
+    // regular       = "art-lojban"        ; these tags match the 'langtag'
+    //               / "cel-gaulish"       ; production, but their subtags
+    //               / "no-bok"            ; are not extended language
+    //               / "no-nyn"            ; or variant subtags: their meaning
+    //               / "zh-guoyu"          ; is defined by their registration
+    //               / "zh-hakka"          ; and all of these are deprecated
+    //               / "zh-min"            ; in favor of a more modern
+    //               / "zh-min-nan"        ; subtag or sequence of subtags
+    //               / "zh-xiang"
+    var regular = "(?:art-lojban|cel-gaulish|no-bok|no-nyn|zh-guoyu|zh-hakka|zh-min|zh-min-nan|zh-xiang)";
+    // irregular     = "en-GB-oed"         ; irregular tags do not match
+    //                / "i-ami"             ; the 'langtag' production and
+    //                / "i-bnn"             ; would not otherwise be
+    //                / "i-default"         ; considered 'well-formed'
+    //                / "i-enochian"        ; These tags are all valid,
+    //                / "i-hak"             ; but most are deprecated
+    //                / "i-klingon"         ; in favor of more modern
+    //                / "i-lux"             ; subtags or subtag
+    //                / "i-mingo"           ; combination
+    //                / "i-navajo"
+    //                / "i-pwn"
+    //                / "i-tao"
+    //                / "i-tay"
+    //                / "i-tsu"
+    //                / "sgn-BE-FR"
+    //                / "sgn-BE-NL"
+    //                / "sgn-CH-DE"
+    var irregular = "(?:en-GB-oed|i-ami|i-bnn|i-default|i-enochian|i-hak|i-klingon|i-lux|i-mingo|i-navajo|i-pwn|i-tao|i-tay|i-tsu|sgn-BE-FR|sgn-BE-NL|sgn-CH-DE)";
+    // grandfathered = irregular           ; non-redundant tags registered
+    //               / regular             ; during the RFC 3066 era
+    var grandfathered = "(?:" + irregular + "|" + regular + ")";
+    // privateuse    = "x" 1*("-" (1*8alphanum))
+    var privateuse = "(?:x(?:-[a-z0-9]{1,8})+)";
+    // singleton     = DIGIT               ; 0 - 9
+    //               / %x41-57             ; A - W
+    //               / %x59-5A             ; Y - Z
+    //               / %x61-77             ; a - w
+    //               / %x79-7A             ; y - z
+    var singleton = "(?:" + DIGIT + "|[A-WY-Za-wy-z])";
+    // extension     = singleton 1*("-" (2*8alphanum))
+    var extension = "(?:" + singleton + "(?:-" + alphanum + "{2,8})+)";
+    // variant       = 5*8alphanum         ; registered variants
+    //               / (DIGIT 3alphanum)
+    var variant = "(?:" + alphanum + "{5,8}|(?:" + DIGIT + alphanum + "{3}))";
+    // region        = 2ALPHA              ; ISO 3166-1 code
+    //               / 3DIGIT              ; UN M.49 code
+    var region = "(?:" + ALPHA + "{2}|" + DIGIT + "{3})";
+    // script        = 4ALPHA              ; ISO 15924 code
+    var script = "(?:" + ALPHA + "{4})";
+    // extlang       = 3ALPHA              ; selected ISO 639 codes
+    //                 *2("-" 3ALPHA)      ; permanently reserved
+    var extlang = "(?:" + ALPHA + "{3}(?:-" + ALPHA + "{3}){0,2})";
+    // language      = 2*3ALPHA            ; shortest ISO 639 code
+    //                 ["-" extlang]       ; sometimes followed by
+    //                                     ; extended language subtags
+    //               / 4ALPHA              ; or reserved for future use
+    //               / 5*8ALPHA            ; or registered language subtag
+    var language = "(?:" + ALPHA + "{2,3}(?:-" + extlang + ")?|" + ALPHA + "{4}|" + ALPHA + "{5,8})";
+    // langtag       = language
+    //                 ["-" script]
+    //                 ["-" region]
+    //                 *("-" variant)
+    //                 *("-" extension)
+    //                 ["-" privateuse]
+    var langtag = language + "(?:-" + script + ")?(?:-" + region + ")?(?:-" +
+      variant + ")*(?:-" + extension + ")*(?:-" + privateuse + ")?";
+    // Language-Tag  = langtag             ; normal language tags
+    //               / privateuse          ; private use tag
+    //               / grandfathered       ; grandfathered tags
+    var languageTag = "^(?:" + langtag + "|" + privateuse + "|" + grandfathered + ")$";
+
+    // Language tags are case insensitive (RFC 5646 section 2.1.1).
+    return new RegExp(languageTag, "i");
+  }());
+
+  var duplicateVariantRE = (function () {
+    // RFC 5234 section B.1
+    // ALPHA          =  %x41-5A / %x61-7A   ; A-Z / a-z
+    var ALPHA = "[a-zA-Z]";
+    // DIGIT          =  %x30-39
+    //                        ; 0-9
+    var DIGIT = "[0-9]";
+
+    // RFC 5646 section 2.1
+    // alphanum      = (ALPHA / DIGIT)     ; letters and numbers
+    var alphanum = "(?:" + ALPHA + "|" + DIGIT + ")";
+    // variant       = 5*8alphanum         ; registered variants
+    //               / (DIGIT 3alphanum)
+    var variant = "(?:" + alphanum + "{5,8}|(?:" + DIGIT + alphanum + "{3}))";
+
+    // Match a langtag that contains a duplicate variant.
+    var duplicateVariant =
+    // Match everything in a langtag prior to any variants, and maybe some
+    // of the variants as well (which makes this pattern inefficient but
+    // not wrong, for our purposes);
+    "(?:" + alphanum + "{2,8}-)+" +
+    // a variant, parenthesised so that we can refer back to it later;
+    "(" + variant + ")-" +
+    // zero or more subtags at least two characters long (thus stopping
+    // before extension and privateuse components);
+    "(?:" + alphanum + "{2,8}-)*" +
+    // and the same variant again
+    "\\1" +
+    // ...but not followed by any characters that would turn it into a
+    // different subtag.
+    "(?!" + alphanum + ")";
+
+  // Language tags are case insensitive (RFC 5646 section 2.1.1), but for
+  // this regular expression that's covered by having its character classes
+  // list both upper- and lower-case characters.
+  return new RegExp(duplicateVariant);
+  }());
+
+
+  var duplicateSingletonRE = (function () {
+    // RFC 5234 section B.1
+    // ALPHA          =  %x41-5A / %x61-7A   ; A-Z / a-z
+    var ALPHA = "[a-zA-Z]";
+    // DIGIT          =  %x30-39
+    //                        ; 0-9
+    var DIGIT = "[0-9]";
+
+    // RFC 5646 section 2.1
+    // alphanum      = (ALPHA / DIGIT)     ; letters and numbers
+    var alphanum = "(?:" + ALPHA + "|" + DIGIT + ")";
+    // singleton     = DIGIT               ; 0 - 9
+    //               / %x41-57             ; A - W
+    //               / %x59-5A             ; Y - Z
+    //               / %x61-77             ; a - w
+    //               / %x79-7A             ; y - z
+    var singleton = "(?:" + DIGIT + "|[A-WY-Za-wy-z])";
+
+    // Match a langtag that contains a duplicate singleton.
+    var duplicateSingleton =
+    // Match a singleton subtag, parenthesised so that we can refer back to
+    // it later;
+      "-(" + singleton + ")-" +
+      // then zero or more subtags;
+      "(?:" + alphanum + "+-)*" +
+      // and the same singleton again
+      "\\1" +
+      // ...but not followed by any characters that would turn it into a
+      // different subtag.
+      "(?!" + alphanum + ")";
+
+  // Language tags are case insensitive (RFC 5646 section 2.1.1), but for
+  // this regular expression that's covered by having its character classes
+  // list both upper- and lower-case characters.
+  return new RegExp(duplicateSingleton);
+  }());
+
+  /**
+   * Verifies that the given string is a well-formed BCP 47 language tag
+   * with no duplicate variant or singleton subtags.
+   *
+   * Spec: ECMAScript Internationalization API Specification, 6.2.2.
+   */
+  function IsStructurallyValidLanguageTag(locale) {
+    if (!languageTagRE.test(locale))
+      return false;
+
+    // Before checking for duplicate variant or singleton subtags with
+    // regular expressions, we have to get private use subtag sequences
+    // out of the picture.
+    if (locale.startsWith("x-"))
+      return true;
+    var pos = locale.indexOf("-x-");
+    if (pos !== -1)
+      locale = locale.substring(0, pos);
+
+    // Check for duplicate variant or singleton subtags.
+    return !duplicateVariantRE.test(locale) &&
+      !duplicateSingletonRE.test(locale);
   }
 
-  /* I18n API TC39 6.2.2 */
-  function isStructurallyValidLanguageTag(locale) {
-    return true;
-  }
+  /**
+   * Canonicalizes the given structurally valid BCP 47 language tag, including
+   * regularized case of subtags. For example, the language tag
+   * Zh-NAN-haNS-bu-variant2-Variant1-u-ca-chinese-t-Zh-laTN-x-PRIVATE, where
+   *
+   *     Zh             ; 2*3ALPHA
+   *     -NAN           ; ["-" extlang]
+   *     -haNS          ; ["-" script]
+   *     -bu            ; ["-" region]
+   *     -variant2      ; *("-" variant)
+   *     -Variant1
+   *     -u-ca-chinese  ; *("-" extension)
+   *     -t-Zh-laTN
+   *     -x-PRIVATE     ; ["-" privateuse]
+   *
+   * becomes nan-Hans-mm-variant2-variant1-t-zh-latn-u-ca-chinese-x-private
+   *
+   * Spec: ECMAScript Internationalization API Specification, 6.2.3.
+   * Spec: RFC 5646, section 4.5.
+   */
+  function CanonicalizeLanguageTag(locale) {
+    // The input
+    // "Zh-NAN-haNS-bu-variant2-Variant1-u-ca-chinese-t-Zh-laTN-x-PRIVATE"
+    // will be used throughout this method to illustrate how it works.
 
+    // Language tags are compared and processed case-insensitively, so
+    // technically it's not necessary to adjust case. But for easier processing,
+    // and because the canonical form for most subtags is lower case, we start
+    // with lower case for all.
+    // "Zh-NAN-haNS-bu-variant2-Variant1-u-ca-chinese-t-Zh-laTN-x-PRIVATE" ->
+    // "zh-nan-hans-bu-variant2-variant1-u-ca-chinese-t-zh-latn-x-private"
+    locale = locale.toLowerCase();
 
-  /* I18n API TC39 6.2.3 */
-  function canonicalizeLanguageTag(locale) {
-    return locale;
-  }
+    // Handle mappings for complete tags.
+    if (langTagMappings && langTagMappings.hasOwnProperty(locale))
+      return langTagMappings[locale];
 
-  /* I18n API TC39 6.2.4 */
-  function defaultLocale() {
-    return data.defaultLocale;
-  }
+    var subtags = locale.split("-");
+    var i = 0;
 
-  /* I18n API TC39 9.2.1 */
-  function canonicalizeLocaleList(locales) {
-    if (locales === undefined) {
-      return [];
-    }
-    
-    var seen = [];
-    
-    if (typeof(locales) == 'string') {
-      locales = new Array(locales);
-    }
+    // Handle the standard part: All subtags before the first singleton or "x".
+    // "zh-nan-hans-bu-variant2-variant1"
+    while (i < subtags.length) {
+      var subtag = subtags[i];
 
-    var len = locales.length;
-    var k = 0;
+      // If we reach the start of an extension sequence or private use part,
+      // we're done with this loop. We have to check for i > 0 because for
+      // irregular language tags, such as i-klingon, the single-character
+      // subtag "i" is not the start of an extension sequence.
+      // In the example, we break at "u".
+      if (subtag.length === 1 && (i > 0 || subtag === "x"))
+        break;
 
-    while (k < len) {
-      var Pk = k.toString();
-      var kPresent = locales.hasOwnProperty(Pk);
-      if (kPresent) {
-        var kValue = locales[Pk];
-
-        if (typeof(kValue) !== 'string' &&
-            typeof(kValue) !== 'object') {
-          throw new TypeError();
-        }
-        
-        var tag = kValue.toString();
-        if (!isStructurallyValidLanguageTag(tag)) {
-          throw new RangeError();
-        }
-        var tag = canonicalizeLanguageTag(tag);
-        if (seen.indexOf(tag) === -1) {
-          seen.push(tag);
+      if (subtag.length === 4) {
+        // 4-character subtags are script codes; their first character
+        // needs to be capitalized. "hans" -> "Hans"
+        subtag = subtag[0].toUpperCase() +
+          subtag.substring(1);
+      } else if (i !== 0 && subtag.length === 2) {
+        // 2-character subtags that are not in initial position are region
+        // codes; they need to be upper case. "bu" -> "BU"
+        subtag = subtag.toUpperCase();
+      }
+      if (langSubtagMappings.hasOwnProperty(subtag)) {
+        // Replace deprecated subtags with their preferred values.
+        // "BU" -> "MM"
+        // This has to come after we capitalize region codes because
+        // otherwise some language and region codes could be confused.
+        // For example, "in" is an obsolete language code for Indonesian,
+        // but "IN" is the country code for India.
+        // Note that the script generating langSubtagMappings makes sure
+        // that no regular subtag mapping will replace an extlang code.
+        subtag = langSubtagMappings[subtag];
+      } else if (extlangMappings.hasOwnProperty(subtag)) {
+        // Replace deprecated extlang subtags with their preferred values,
+        // and remove the preceding subtag if it's a redundant prefix.
+        // "zh-nan" -> "nan"
+        // Note that the script generating extlangMappings makes sure that
+        // no extlang mapping will replace a normal language code.
+        subtag = extlangMappings[subtag].preferred;
+        if (i === 1 && extlangMappings[subtag].prefix === subtags[0]) {
+          subtags.shift();
+          i--;
         }
       }
-      k += 1;
+      subtags[i] = subtag;
+      i++;
+    }
+    var normal = subtags.slice(0, i).join("-");
+
+    // Extension sequences are sorted by their singleton characters.
+    // "u-ca-chinese-t-zh-latn" -> "t-zh-latn-u-ca-chinese"
+    var extensions = [];
+    while (i < subtags.length && subtags[i] !== "x") {
+      var extensionStart = i;
+      i++;
+      while (i < subtags.length && subtags[i].length > 1)
+        i++;
+      var extension = sybtags.slice(extensionStart, i).join("-");
+      extensions.push(extension);
+    }
+    extensions.sort();
+
+    // Private use sequences are left as is. "x-private"
+    var privateUse = "";
+    if (i < subtags.length)
+      privateUse = subtags.slice(i).join("-");
+
+    // Put everything back together.
+    var canonical = normal;
+    if (extensions.length > 0)
+      canonical += "-" + extensions.join("-");
+    if (privateUse.length > 0) {
+      // Be careful of a Language-Tag that is entirely privateuse.
+      if (canonical.length > 0)
+        canonical += "-" + privateUse;
+      else
+        canonical = privateUse;
+    }
+
+    return canonical;
+  }
+
+  /**
+   * Canonicalizes a locale list.
+   *
+   * Spec: ECMAScript Internationalization API Specification, 9.2.1.
+   */
+  function CanonicalizeLocaleList(locales) {
+    if (locales === undefined)
+      return [];
+    var seen = [];
+    if (typeof locales === "string")
+      locales = [locales];
+    var O = locales;
+    var len = O.length;
+    var k = 0;
+    while (k < len) {
+      // Don't call ToString(k) - SpiderMonkey is faster with integers.
+      var kPresent = k in O;
+      if (kPresent) {
+        var kValue = O[k];
+        if (!(typeof kValue === "string" || typeof kValue === "object"))
+          ThrowError(JSMSG_INVALID_LOCALES_ELEMENT);
+        var tag = kValue;
+        if (!IsStructurallyValidLanguageTag(tag))
+          ThrowError(JSMSG_INVALID_LANGUAGE_TAG, tag);
+        tag = CanonicalizeLanguageTag(tag);
+        if (seen.indexOf(tag) === -1)
+          seen.push(tag);
+      }
+      k++;
     }
     return seen;
   }
 
-  /* I18n API TC39 9.2.2 */
-  function bestAvailableLocale(availableLocales, locale) {
+  /**
+   * Compares a BCP 47 language tag against the locales in availableLocales
+   * and returns the best available match. Uses the fallback
+   * mechanism of RFC 4647, section 3.4.
+   *
+   * Spec: ECMAScript Internationalization API Specification, 9.2.2.
+   * Spec: RFC 4647, section 3.4.
+   */
+  function BestAvailableLocale(availableLocales, locale) {
     var candidate = locale;
-    while (1) {
-      if (availableLocales.indexOf(candidate) !== -1) {
+    while (true) {
+      if (availableLocales.indexOf(candidate) !== -1)
         return candidate;
-      }
-
       var pos = candidate.lastIndexOf('-');
-
-      if (pos === -1) {
+      if (pos === -1)
         return undefined;
-      }
-
-      if (pos >= 2 && candidate[pos-2] == '-') {
+      if (pos >= 2 && candidate[pos - 2] === "-")
         pos -= 2;
-      }
-      candidate = candidate.substr(0, pos)
+      candidate = candidate.substring(0, pos);
     }
-  }
-
-  /* I18n API TC39 9.2.3 */
-  function lookupMatcher(availableLocales, requestedLocales) {
-    var i = 0;
-    var len = requestedLocales.length;
-    var availableLocale = undefined;
-
-    while (i < len && availableLocale === undefined) {
-      var locale = requestedLocales[i];
-      var noExtensionsLocale = locale;
-      var availableLocale = bestAvailableLocale(availableLocales,
-                                                noExtensionsLocale);
-      i += 1;
-    }
-    
-    var result = {};
-    
-    if (availableLocale !== undefined) {
-      result.locale = availableLocale;
-      if (locale !== noExtensionsLocale) {
-        throw "NotImplemented";
-      }
-    } else {
-      result.locale = defaultLocale();
-    }
-    return result;
-  }
-
-  /* I18n API TC39 9.2.4 */
-  var bestFitMatcher = lookupMatcher;
-
-  /* I18n API TC39 9.2.5 */
-  function resolveLocale(availableLocales,
-                         requestedLocales,
-                         options,
-                         relevantExtensionKeys,
-                         localeData) {
-
-    var matcher = options.localeMatcher;
-    if (matcher == 'lookup') {
-      var r = lookupMatcher(availableLocales, requestedLocales);
-    } else {
-      var r = bestFitMatcher(availableLocales, requestedLocales);
-    }
-    var foundLocale = r.locale;
-
-    if (r.hasOwnProperty('extension')) {
-      throw "NotImplemented";
-    }
-
-    var result = {};
-    result.dataLocale = foundLocale;
-
-    var supportedExtension = "-u";
-
-    var i = 0;
-    var len = 0;
-
-    if (relevantExtensionKeys !== undefined) {
-      len = relevantExtensionKeys.length;
-    }
-    
-    while (i < len) {
-      var key = relevantExtensionKeys[i.toString()];
-      var foundLocaleData = localeData(foundLocale);
-      var keyLocaleData = foundLocaleData[foundLocale];
-      var value = keyLocaleData[0];
-      var supportedExtensionAddition = "";
-      if (extensionSubtags !== undefined) {
-        throw "NotImplemented";
-      }
-
-      if (options.hasOwnProperty('key')) {
-        var optionsValue = options.key;
-        if (keyLocaleData.indexOf(optionsValue) !== -1) {
-          if (optionsValue !== value) {
-            value = optionsValue;
-            supportedExtensionAddition = "";
-          }
-        }
-        result.key = value;
-        supportedExtension += supportedExtensionAddition;
-        i += 1;
-      }
-    }
-
-    if (supportedExtension.length > 2) {
-      var preExtension = foundLocale.substr(0, extensionIndex);
-      var postExtension = foundLocale.substr(extensionIndex+1);
-      var foundLocale = preExtension + supportedExtension + postExtension;
-    }
-    result.locale = foundLocale;
-    return result;
   }
 
   /**
-   * availableLocales - The list of locales that the system offers
+   * Returns the subset of availableLocales for which requestedLocales has a
+   * matching (possibly fallback) locale. Locales appear in the same order in the
+   * returned list as in the input list.
    *
-   * returns the list of availableLocales sorted by user preferred locales
-   **/
-  function prioritizeLocales(availableLocales, requestedLocales) {
-    var options = {'localeMatcher': 'lookup'};
-    var tag = resolveLocale(availableLocales,
-                            requestedLocales, options);
-    var pos = availableLocales.indexOf(tag.locale)
+   * This function is a slight modification of the LookupSupprtedLocales algorithm
+   * The difference is in step 4d where instead of adding requested locale,
+   * we're adding availableLocale to the subset.
+   *
+   * This allows us to directly use returned subset to pool resources.
+   *
+   * Spec: ECMAScript Internationalization API Specification, 9.2.6.
+   */
+  function LookupAvailableLocales(availableLocales, requestedLocales) {
+    // Steps 1-2.
+    var len = requestedLocales.length;
+    var subset = [];
 
-    if (pos === -1) {
-      // not sure why resolveLocale can return a locale that is not available
-      return availableLocales;
+    // Steps 3-4.
+    var k = 0;
+    while (k < len) {
+      // Steps 4.a-b.
+      var locale = requestedLocales[k];
+      var noExtensionsLocale = locale.replace(unicodeLocaleExtensionSequenceGlobalRE, "");
+
+      // Step 4.c-d.
+      var availableLocale = BestAvailableLocale(availableLocales, noExtensionsLocale);
+      if (availableLocale !== undefined)
+        // in LookupSupportedLocales it pushes locale here
+        subset.push(availableLocale);
+
+      // Step 4.e.
+      k++;
     }
-    availableLocales.splice(pos, 1);
-    availableLocales.unshift(tag.locale)
-    return availableLocales;
+
+    // Steps 5-6.
+    return subset.slice(0);
+  }
+
+  function PrioritizeLocales(availableLocales,
+                             requestedLocales,
+                             defaultLocale) {
+    availableLocales = CanonicalizeLocaleList(availableLocales);
+    requestedLocales = CanonicalizeLocaleList(requestedLocales);
+
+    var result = LookupAvailableLocales(availableLocales, requestedLocales);
+    if (!defaultLocale) {
+      return result;
+    }
+
+    // if default locale is not present in result,
+    // add it to the end of fallback chain
+    defaultLocale = CanonicalizeLanguageTag(defaultLocale);
+    if (result.indexOf(defaultLocale) === -1) {
+      result.push(defaultLocale);
+    }
+    return result;
   }
 
   exports.Intl = {
-    prioritizeLocales: prioritizeLocales
+    prioritizeLocales: PrioritizeLocales
   };
 
 });

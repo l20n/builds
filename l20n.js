@@ -73,7 +73,8 @@ define('l20n/html', function(require, exports, module) {
 
   function bootstrap() {
     var headNode = document.head;
-    var data = headNode.querySelector('script[type="application/l10n-data+json"]');
+    var data = 
+      headNode.querySelector('script[type="application/l10n-data+json"]');
     if (data) {
       ctx.data = JSON.parse(data.textContent);
     }
@@ -93,7 +94,7 @@ define('l20n/html', function(require, exports, module) {
         // XXX add errback
         loadManifest(link.getAttribute('href')).then(ctx.freeze.bind(ctx));
       } else {
-        console.warn("L20n: No resources found. (Put them above l20n.js.)");
+        console.warn('L20n: No resources found. (Put them above l20n.js.)');
       }
     }
 
@@ -117,7 +118,7 @@ define('l20n/html', function(require, exports, module) {
                       l10n.entities[nodes.ids[i]]);
       }
 
-      // 'locales in l10n.reason mean that localize has been
+      // 'locales' in l10n.reason means that localize has been
       // called because of locale change
       if ('locales' in l10n.reason && l10n.reason.locales.length) {
         document.documentElement.lang = l10n.reason.locales[0];
@@ -155,10 +156,10 @@ define('l20n/html', function(require, exports, module) {
         var callAndRemove = function callAndRemove() {
           document.removeEventListener('DocumentLocalized', callAndRemove);
           callback();
-        }
+        };
         document.addEventListener('DocumentLocalized', callAndRemove);
       }
-    }
+    };
     document.l10n = ctx;
   }
 
@@ -318,7 +319,8 @@ define('l20n/html', function(require, exports, module) {
         var pathToParent = getPathTo(element.parentNode, context);
         return pathToParent + '/' + element.tagName + '[' + (index + 1) + ']';
       }
-      if (sibling.nodeType === TYPE_ELEMENT && sibling.tagName === element.tagName) {
+      if (sibling.nodeType === TYPE_ELEMENT && 
+          sibling.tagName === element.tagName) {
         index++;
       }
     }
@@ -382,7 +384,7 @@ define('l20n/context', function(require, exports, module) {
 
     function build(nesting, async) {
       if (nesting >= 7) {
-        throw new ContextError("Too many nested imports.");
+        throw new ContextError('Too many nested imports.');
       }
       if (!async) {
         fetch(async);
@@ -404,7 +406,7 @@ define('l20n/context', function(require, exports, module) {
         }
         try {
           return self.source = io.loadSync(self.id);
-        } catch(e) {
+        } catch (e) {
           if (e instanceof io.Error) {
             return self.source = '';
           } else {
@@ -452,7 +454,7 @@ define('l20n/context', function(require, exports, module) {
     }
 
     function flatten() {
-      for (var i = self.resources.length-1; i >= 0; i--) {
+      for (var i = self.resources.length - 1; i >= 0; i--) {
         var pos = _imports_positions[i] || 0;
         Array.prototype.splice.apply(self.ast.body,
           [pos, 1].concat(self.resources[i].ast.body));
@@ -559,7 +561,9 @@ define('l20n/context', function(require, exports, module) {
     this.addEventListener = addEventListener;
     this.removeEventListener = removeEventListener;
 
-    // all languages registered as available (list of codes)
+    // all languages explicitly registered as available (list of codes)
+    var _registered = [];
+    // internal list of all available locales, including __none__ if needed
     var _available = [];
     // Locale objects corresponding to the registered languages
     var _locales = {
@@ -588,21 +592,21 @@ define('l20n/context', function(require, exports, module) {
 
     function get(id, data) {
       if (!_isReady) {
-        throw new ContextError("Context not ready");
+        throw new ContextError('Context not ready');
       }
       return getFromLocale.call(self, 0, id, data).value;
     }
 
     function getEntity(id, data) {
       if (!_isReady) {
-        throw new ContextError("Context not ready");
+        throw new ContextError('Context not ready');
       }
       return getFromLocale.call(self, 0, id, data);
     }
 
     function localize(ids, callback) {
       if (!callback) {
-        throw new ContextError("No callback passed");
+        throw new ContextError('No callback passed');
       }
       return bindLocalize.call(self, ids, callback);
     }
@@ -638,7 +642,7 @@ define('l20n/context', function(require, exports, module) {
           }, true);
           return newMany;
         }.bind(this)
-      }
+      };
 
 
       // if the ctx isn't ready, bind the callback and return
@@ -655,7 +659,10 @@ define('l20n/context', function(require, exports, module) {
       var many = getMany.call(this, ids);
       var l10n = {
         entities: many.entities,
-        reason: reason
+        // `reason` might be undefined if context was ready before `localize` 
+        // was called;  in that case, we pass `locales` so that this scenario 
+        // is transparent for the callback
+        reason: reason || { locales: _registered.slice() }
         // stop: fn
       };
       _retr.bindGet({
@@ -675,7 +682,7 @@ define('l20n/context', function(require, exports, module) {
       var many = {
         entities: {},
         globalsUsed: {}
-      }
+      };
       for (var i = 0, id; id = ids[i]; i++) {
         many.entities[id] = getEntity.call(this, id);
         for (var global in many.entities[id].globals) {
@@ -689,7 +696,7 @@ define('l20n/context', function(require, exports, module) {
       var locale = _locales[_available[cur]];
 
       if (!locale) {
-        var ex = new GetError("Entity couldn't be retrieved", id, _available);
+        var ex = new GetError("Entity couldn't be retrieved", id, _registered);
         _emitter.emit('error', ex);
         // imitate the return value of Compiler.Entity.get
         return {
@@ -708,14 +715,14 @@ define('l20n/context', function(require, exports, module) {
 
       // if the entry is missing, just go to the next locale immediately
       if (entry === undefined) {
-        _emitter.emit('error', new EntityError("Not found", id, locale.id));
+        _emitter.emit('error', new EntityError('Not found', id, locale.id));
         return getFromLocale.call(this, cur + 1, id, data, sourceString);
       }
 
       // otherwise, try to get the value of the entry
       try {
         var value = entry.get(getArgs.call(this, data));
-      } catch(e) {
+      } catch (e) {
         if (e instanceof Compiler.RuntimeError) {
           _emitter.emit('error', new EntityError(e.message, id, locale.id));
           return getFromLocale.call(this, cur + 1, id, data, 
@@ -746,7 +753,7 @@ define('l20n/context', function(require, exports, module) {
 
     function addResource(text) {
       if (_isFrozen) {
-        throw new ContextError("Context is frozen");
+        throw new ContextError('Context is frozen');
       }
       _reslinks.push(['text', text]);
     }
@@ -759,7 +766,7 @@ define('l20n/context', function(require, exports, module) {
 
     function linkResource(uri) {
       if (_isFrozen) {
-        throw new ContextError("Context is frozen");
+        throw new ContextError('Context is frozen');
       }
       _reslinks.push([typeof uri === 'function' ? 'template' : 'uri', uri]);
     }
@@ -773,19 +780,19 @@ define('l20n/context', function(require, exports, module) {
 
     function registerLocales() {
       if (_isFrozen && !_isReady) {
-        throw new ContextError("Context not ready");
+        throw new ContextError('Context not ready');
       }
-      _available = [];
-      // _available should remain empty if:
+      _registered = [];
+      // _registered should remain empty if:
       //   1. there are no arguments passed, or
       //   2. the only argument is null
       if (!(arguments[0] === null && arguments.length === 1)) {
         for (var i in arguments) {
           var loc = arguments[i];
           if (typeof loc !== 'string') {
-            throw new ContextError("Language codes must be strings");
+            throw new ContextError('Language codes must be strings');
           }
-          _available.push(loc);
+          _registered.push(loc);
           if (!(loc in _locales)) {
             _locales[loc] = new Locale(loc, _parser, _compiler);
           }
@@ -798,21 +805,24 @@ define('l20n/context', function(require, exports, module) {
 
     function freeze() {
       if (_isFrozen && !_isReady) {
-        throw new ContextError("Context not ready");
+        throw new ContextError('Context not ready');
       }
 
       _isFrozen = true;
 
       // is the contex empty?
       if (_reslinks.length == 0) {
-        throw new ContextError("Context has no resources");
+        throw new ContextError('Context has no resources');
       }
 
+      _available = [];
       // if no locales have been registered, create a __none__ locale for the 
       // single-locale mode
-      if (_available.length === 0) {
+      if (_registered.length === 0) {
         _locales.__none__ = new Locale(null, _parser, _compiler);
         _available.push('__none__');
+      } else {
+        _available = _registered.slice();
       }
       
       // add & link all resources to the available locales
@@ -834,7 +844,7 @@ define('l20n/context', function(require, exports, module) {
             if (locale.id) {
               link(res[1](locale.id), locale);
             } else {
-              throw new ContextError("No registered locales");
+              throw new ContextError('No registered locales');
             }
           }
         }
@@ -853,10 +863,7 @@ define('l20n/context', function(require, exports, module) {
 
     function setReady() {
       _isReady = true;
-      var currentLocales = _available.filter(function(loc){
-        return loc !== '__none__';
-      });
-      _retr.all(currentLocales);
+      _retr.all(_registered.slice());
       _emitter.emit('ready');
     }
 
@@ -898,10 +905,10 @@ define('l20n/context', function(require, exports, module) {
     this.name = 'GetError';
     this.id = id;
     this.tried = locs;
-    if (locs[0] === '__none__') {
-      this.message = id + ': ' + message;
-    } else {
+    if (locs.length) {
       this.message = id + ': ' + message + '; tried ' + locs.join(', ');
+    } else {
+      this.message = id + ': ' + message;
     }
   }
   GetError.prototype = Object.create(ContextError.prototype);
@@ -928,7 +935,7 @@ define('l20n/events', function(require, exports, module) {
       typeListeners[i].apply(this, args);
     }
     return true;
-  }
+  };
 
   EventEmitter.prototype.addEventListener = function ee_add(type, listener) {
     if (!this._listeners[type]) {
@@ -936,9 +943,9 @@ define('l20n/events', function(require, exports, module) {
     }
     this._listeners[type].push(listener);
     return this;
-  }
+  };
 
-  EventEmitter.prototype.removeEventListener = function ee_remove(type, listener) {
+  EventEmitter.prototype.removeEventListener = function ee_rm(type, listener) {
     var typeListeners = this._listeners[type];
     var pos = typeListeners.indexOf(listener);
     if (pos === -1) {
@@ -946,7 +953,7 @@ define('l20n/events', function(require, exports, module) {
     }
     typeListeners.splice(pos, 1);
     return this;
-  }
+  };
 
   exports.EventEmitter = EventEmitter;
 
@@ -966,6 +973,8 @@ define('l20n/parser', function(require, exports, module) {
     this.removeEventListener = removeEventListener;
 
     /* Private */
+
+    var MAX_PLACEABLES = 100;
 
     var _source, _index, _length, _emitter;
 
@@ -1130,7 +1139,8 @@ define('l20n/parser', function(require, exports, module) {
         ch = _source.charAt(_index);
       }
       if (ch === "'" || ch === '"') {
-        if (ch === _source.charAt(_index + 1) && ch === _source.charAt(_index + 2)) {
+        if (ch === _source.charAt(_index + 1) && 
+            ch === _source.charAt(_index + 2)) {
           return getString(ch + ch + ch);
         }
         return getString(ch);
@@ -1183,7 +1193,7 @@ define('l20n/parser', function(require, exports, module) {
       }
 
       cc = source.charCodeAt(++index);
-      while ((cc >= 95 && cc <= 122) || // a-z
+      while ((cc >= 97 && cc <= 122) || // a-z
              (cc >= 65 && cc <= 90) ||  // A-Z
              (cc >= 48 && cc <= 57) ||  // 0-9
              cc === 95) {               // _
@@ -1335,6 +1345,8 @@ define('l20n/parser', function(require, exports, module) {
       var body;                   // body of a complex string
       var bstart = _index;        // buffer start index
       var complex = false;
+      var placeables = 0;         // number of placeables found, capped by 
+                                  // MAX_PLACEABLES
 
       // unescape \\ \' \" \{{
       var pos = _source.indexOf('\\');
@@ -1362,6 +1374,10 @@ define('l20n/parser', function(require, exports, module) {
           body = [];
           complex = true;
         }
+        if (placeables > MAX_PLACEABLES - 1) {
+          throw error('Too many placeables, maximum allowed is ' +
+                      MAX_PLACEABLES);
+        }
         if (bstart < pos) {
           body.push({
             type: 'String',
@@ -1373,9 +1389,10 @@ define('l20n/parser', function(require, exports, module) {
         body.push(getExpression());
         getWS();
         if (_source.charCodeAt(_index) !== 125 ||
-            _source.charCodeAt(_index+1) !== 125) {
+            _source.charCodeAt(_index + 1) !== 125) {
           throw error('Expected "}}"');
         }
+        placeables++;
         pos = _index + 2;
         bstart = pos;
         pos = _source.indexOf('{{', pos);
@@ -1471,14 +1488,14 @@ define('l20n/parser', function(require, exports, module) {
 
     function addEventListener(type, listener) {
       if (!_emitter) {
-        throw Error("Emitter not available");
+        throw Error('Emitter not available');
       }
       return _emitter.addEventListener(type, listener);
     }
 
     function removeEventListener(type, listener) {
       if (!_emitter) {
-        throw Error("Emitter not available");
+        throw Error('Emitter not available');
       }
       return _emitter.removeEventListener(type, listener);
     }
@@ -1641,7 +1658,8 @@ define('l20n/parser', function(require, exports, module) {
       if (idref.type !== 'ParenthesisExpression' &&
           idref.type !== 'Identifier' &&
           idref.type !== 'ThisExpression') {
-        throw error('AttributeExpression must have Identifier, This or Parenthesis as left node');
+        throw error('AttributeExpression must have Identifier, This or ' +
+                    'Parenthesis as left node');
       }
       var exp;
       if (computed) {
@@ -1991,14 +2009,14 @@ define('l20n/parser', function(require, exports, module) {
 // a `stringLiteral` and a `propertyExpression`.  The `PropertyExpression` 
 // contructor will do the same, etc...
 //
-// When `entity.toString(ctxdata)` is called by a third-party code, we need to 
+// When `entity.getString(ctxdata)` is called by a third-party code, we need to 
 // resolve the whole `complexString` <1> to return a single string value.  This 
 // is what **resolving** means and it involves some recursion.  On the other 
 // hand, **evaluating** means _to call the expression once and use what it 
 // returns_.
 // 
-// `toString` sets `locals.__this__` to the current entity, `about` and tells 
-// the `complexString` <1> to _resolve_ itself.
+// The identifier expression sets `locals.__this__` to the current entity, 
+// `about`, and tells the `complexString` <1> to _resolve_ itself.
 //
 // In order to resolve the `complexString` <1>, we start by resolving its first 
 // member <2> to a string.  As we resolve deeper down, we bubble down `locals` 
@@ -2043,10 +2061,12 @@ define('l20n/compiler', function(require, exports, module) {
 
     // Private
 
+    var MAX_PLACEABLE_LENGTH = 2500;
+
     var _emitter = new EventEmitter();
     var _parser = new Parser(true);
     var _env = {};
-    var _globals = {};
+    var _globals = null;
     var _references = {
       globals: {}
     };
@@ -2090,7 +2110,7 @@ define('l20n/compiler', function(require, exports, module) {
     // reset the state of a compiler instance; used in tests
     function reset() {
       _env = {};
-      _globals = {};
+      _globals = null;
       _references.globals = {};
       return this;
     }
@@ -2112,7 +2132,7 @@ define('l20n/compiler', function(require, exports, module) {
       this.publicAttributes = [];
       var i;
       for (i = 0; i < node.index.length; i++) {
-        this.index.push(Expression(node.index[i], this));
+        this.index.push(IndexExpression(node.index[i], this));
       }
       for (i = 0; i < node.attrs.length; i++) {
         var attr = node.attrs[i];
@@ -2122,52 +2142,32 @@ define('l20n/compiler', function(require, exports, module) {
         }
       }
       if (node.value && node.value.isNotComplex) {
-        this.isNotComplex = true;
         this.value = node.value.content;
       } else {
         this.value = Expression(node.value, this, this.index);
       }
     }
-    // Entities are wrappers around their value expression.  _Yielding_ from 
-    // the entity is identical to _evaluating_ its value with the appropriate 
-    // value of `locals.__this__`.  See `PropertyExpression` for an example 
-    // usage.
-    Entity.prototype._yield = function E_yield(ctxdata, key) {
-      var locals = {
-        __this__: this
-      };
-      if (this.isNotComplex) {
-        return [locals, this.value];
-      }
-      return this.value(locals, ctxdata, key);
-    };
-    // Calling `entity._resolve` will _resolve_ its value to a primitive value.  
-    // See `ComplexString` for an example usage.
-    Entity.prototype._resolve = function E_resolve(ctxdata) {
-      if (this.isNotComplex) {
-        return this.value;
-      }
-      var locals = {
-        __this__: this
-      };
-      return _resolve(this.value, locals, ctxdata);
-    };
+
     Entity.prototype.getString = function E_getString(ctxdata) {
       try {
-        return this._resolve(ctxdata);
+        var locals = {
+          __this__: this
+        };
+        return _resolve(this.value, locals, ctxdata);
       } catch (e) {
         requireCompilerError(e);
         // `ValueErrors` are not emitted in `StringLiteral` where they are 
         // created, because if the string in question is being evaluated in an 
         // index, we'll emit an `IndexError` instead.  To avoid duplication, 
-        // the `ValueErrors` will only be emitted if it actually made it to 
-        // here.  See `HashLiteral` for an example of why it wouldn't make it.
+        // `ValueErrors` are only be emitted if they actually make it to 
+        // here.  See `IndexExpression` for an example of why they wouldn't.
         if (e instanceof ValueError) {
           _emitter.emit('error', e);
         }
         throw e;
       }
     };
+
     Entity.prototype.get = function E_get(ctxdata) {
       // reset `_references` to an empty state
       _references.globals = {};
@@ -2183,44 +2183,30 @@ define('l20n/compiler', function(require, exports, module) {
       }
       entity.globals = _references.globals;
       return entity;
-    }
+    };
+
 
     function Attribute(node, entity) {
       this.key = node.key.name;
       this.local = node.local || false;
       this.index = [];
       for (var i = 0; i < node.index.length; i++) {
-        this.index.push(Expression(node.index[i], this));
+        this.index.push(IndexExpression(node.index[i], this));
       }
       if (node.value && node.value.isNotComplex) {
-        this.isNotComplex = true;
         this.value = node.value.content;
       } else {
         this.value = Expression(node.value, entity, this.index);
       }
       this.entity = entity;
     }
-    Attribute.prototype._yield = function A_yield(ctxdata, key) {
-      var locals = {
-        __this__: this.entity
-      };
-      if (this.isNotComplex) {
-        return [locals, this.value];
-      }
-      return this.value(locals, ctxdata, key);
-    };
-    Attribute.prototype._resolve = function A_resolve(ctxdata) {
-      if (this.isNotComplex) {
-        return this.value;
-      }
-      var locals = {
-        __this__: this.entity
-      };
-      return _resolve(this.value, locals, ctxdata);
-    };
+
     Attribute.prototype.getString = function A_getString(ctxdata) {
       try {
-        return this._resolve(ctxdata);
+        var locals = {
+          __this__: this.entity
+        };
+        return _resolve(this.value, locals, ctxdata);
       } catch (e) {
         requireCompilerError(e);
         if (e instanceof ValueError) {
@@ -2236,15 +2222,23 @@ define('l20n/compiler', function(require, exports, module) {
       this.expression = Expression(node.expression, this);
       this.args = node.args;
     }
-    Macro.prototype._call = function M_call(ctxdata, args) {
+    Macro.prototype._call = function M_call(args, ctxdata) {
       var locals = {
         __this__: this
       };
+      // the number of arguments passed must equal the macro's arity
+      if (this.args.length !== args.length) {
+        throw new RuntimeError(this.id + '() takes exactly ' +
+                               this.args.length + ' argument(s) (' +
+                               args.length + ' given)');
+      }
       for (var i = 0; i < this.args.length; i++) {
         locals[this.args[i].id.name] = args[i];
       }
-      return this.expression(locals, ctxdata);
-    }
+      var final = this.expression(locals, ctxdata);
+      locals = final[0], final = final[1];
+      return [locals, _resolve(final, locals, ctxdata)];
+    };
 
 
     var EXPRESSION_TYPES = {
@@ -2276,8 +2270,9 @@ define('l20n/compiler', function(require, exports, module) {
 
     // The 'dispatcher' expression constructor.  Other expression constructors 
     // call this to create expression functions for their components.  For 
-    // instance, `ConditionalExpression` calls `Expression` to create expression 
-    // functions for its `test`, `consequent` and `alternate` symbols.
+    // instance, `ConditionalExpression` calls `Expression` to create 
+    // expression functions for its `test`, `consequent` and `alternate` 
+    // symbols.
     function Expression(node, entry, index) {
       // An entity can have no value.  It will be resolved to `null`.
       if (!node) {
@@ -2295,30 +2290,49 @@ define('l20n/compiler', function(require, exports, module) {
     function _resolve(expr, locals, ctxdata) {
       // Bail out early if it's a primitive value or `null`.  This is exactly 
       // what we want.
-      if (!expr || 
-          typeof expr === 'string' || 
+      if (typeof expr === 'string' || 
           typeof expr === 'boolean' || 
-          typeof expr === 'number') {
+          typeof expr === 'number' ||
+          !expr) {
         return expr;
       }
-      // Check if `expr` knows how to resolve itself (if it's an Entity or an 
-      // Attribute).
-      if (expr._resolve) {
-        return expr._resolve(ctxdata);
+
+      // Check if `expr` is an Entity or an Attribute
+      if (expr.value !== undefined) {
+        return _resolve(expr.value, locals, ctxdata);
       }
-      var current = expr(locals, ctxdata);
-      locals = current[0], current = current[1];
-      return _resolve(current, locals, ctxdata);
+
+      // Check if `expr` is an expression
+      if (typeof expr === 'function') {
+        var current = expr(locals, ctxdata);
+        locals = current[0], current = current[1];
+        return _resolve(current, locals, ctxdata);
+      }
+
+      // Throw if `expr` is a macro
+      if (expr.expression) {
+        throw new RuntimeError('Uncalled macro: ' + expr.id);
+      }
+
+      // Throw if `expr` is a non-primitive from ctxdata or a global
+      throw new RuntimeError('Cannot resolve ctxdata or global of type ' +
+                             typeof expr);
+
     }
 
     function Identifier(node, entry) {
       var name = node.name;
       return function identifier(locals, ctxdata) {
         if (!_env.hasOwnProperty(name)) {
-          throw new RuntimeError('Reference to an unknown entry: ' + name,
-                                 entry);
+          throw new RuntimeError('Reference to an unknown entry: ' + name);
         }
-        locals.__this__ = _env[name];
+        // The only thing we care about here is the new `__this__` so we 
+        // discard any other local variables.  Note that because this is an 
+        // assignment to a local variable, the original `locals` passed is not 
+        // changed.
+        locals = {
+          __this__: _env[name]
+        };
         return [locals, _env[name]];
       };
     }
@@ -2335,8 +2349,7 @@ define('l20n/compiler', function(require, exports, module) {
           return locals[name];
         }
         if (!ctxdata || !ctxdata.hasOwnProperty(name)) {
-          throw new RuntimeError('Reference to an unknown variable: ' + name,
-                                 entry);
+          throw new RuntimeError('Reference to an unknown variable: ' + name);
         }
         return [locals, ctxdata[name]];
       };
@@ -2345,17 +2358,15 @@ define('l20n/compiler', function(require, exports, module) {
       var name = node.id.name;
       return function globalsExpression(locals, ctxdata) {
         if (!_globals) {
-          throw new RuntimeError('No globals set (tried @' + name + ').',
-                                 entry);
+          throw new RuntimeError('No globals set (tried @' + name + ')');
         }
         if (!_globals.hasOwnProperty(name)) {
-          throw new RuntimeError('Reference to an unknown global: ' + name,
-                                 entry);
+          throw new RuntimeError('Reference to an unknown global: ' + name);
         }
         try {
           var value = _globals[name].get();
         } catch (e) {
-          throw new RuntimeError('Cannot evaluate global ' + name, entry);
+          throw new RuntimeError('Cannot evaluate global ' + name);
         }
         _references.globals[name] = true;
         return [locals, value];
@@ -2368,12 +2379,18 @@ define('l20n/compiler', function(require, exports, module) {
     }
     function StringLiteral(node, entry) {
       var parsed, complex;
-      return function stringLiteral(locals, ctxdata) {
+      return function stringLiteral(locals, ctxdata, key) {
+        // if a key was passed, throw;  checking arguments is more reliable 
+        // than testing the value of key because if the key comes from context 
+        // data it can be any type, also undefined
+        if (arguments.length > 2) {
+          throw new RuntimeError('Cannot get property of a string: ' + key);
+        }
         if (!complex) {
           try {
             parsed = _parser.parseString(node.content);
           } catch (e) {
-            throw new ValueError("Malformed string. " + e.message, entry, 
+            throw new ValueError('Malformed string. ' + e.message, entry, 
                                  node.content);
           }
           if (parsed.type == 'String') {
@@ -2387,39 +2404,90 @@ define('l20n/compiler', function(require, exports, module) {
           requireCompilerError(e);
           // only throw, don't emit yet.  If the `ValueError` makes it to 
           // `getString()` it will be emitted there.  It might, however, be 
-          // cought by `HashLiteral` and changed into a `IndexError`.  See 
-          // those Expressions for more docs.
+          // cought by `IndexExpression` and changed into a `IndexError`.  See 
+          // `IndexExpression` for more explanation.
           throw new ValueError(e.message, entry, node.content);
         }
       };
     }
-    function HashLiteral(node, entry, index) {
-      var content = [];
-      // if absent, `defaultKey` and `defaultIndex` are undefined
-      var defaultKey;
-      var defaultIndex = index.length ? index.shift() : undefined;
-      for (var i = 0; i < node.content.length; i++) {
-        var elem = node.content[i];
-        // use `elem.value` to skip `HashItem` and create the value right away
-        content[elem.key.name] = Expression(elem.value, entry, index);
-        if (elem.default) {
-          defaultKey = elem.key.name;
-        }
-      }
-      return function hashLiteral(locals, ctxdata, prop) {
-        var keysToTry = [prop, defaultIndex, defaultKey];
-        var keysTried = [];
-        for (var i = 0; i < keysToTry.length; i++) {
-          try {
-            // only defaultIndex needs to be resolved
-            var key = keysToTry[i] = _resolve(keysToTry[i], locals, ctxdata);
-          } catch (e) {
-            requireCompilerError(e);
 
-            // Throw and emit an IndexError so that ValueErrors from the index 
-            // don't make their way to the context.  The context only cares 
-            // about ValueErrors thrown by the value of the entity it has 
-            // requested, not entities used in the index.
+    function ComplexString(node, entry) {
+      var content = [];
+      for (var i = 0; i < node.content.length; i++) {
+        content.push(Expression(node.content[i], entry));
+      }
+
+      // Every complexString needs to have its own `dirty` flag whose state 
+      // persists across multiple calls to the given complexString.  On the 
+      // other hand, `dirty` must not be shared by all complexStrings.  Hence 
+      // the need to define `dirty` as a variable available in the closure.  
+      // Note that the anonymous function is a self-invoked one and it returns 
+      // the closure immediately.
+      return function() {
+        var dirty = false;
+        return function complexString(locals, ctxdata) {
+          if (dirty) {
+            throw new RuntimeError('Cyclic reference detected');
+          }
+          dirty = true;
+          var parts = [];
+          try {
+            for (var i = 0; i < content.length; i++) {
+              var part = _resolve(content[i], locals, ctxdata);
+              if (typeof part !== 'string' && typeof part !== 'number') {
+                throw new RuntimeError('Placeables must be strings or ' +
+                                       'numbers');
+              }
+              if (part.length > MAX_PLACEABLE_LENGTH) {
+                throw new RuntimeError('Placeable has too many characters, ' +
+                                       'maximum allowed is ' +
+                                       MAX_PLACEABLE_LENGTH);
+              }
+              parts.push(part);
+            }
+          } finally {
+            dirty = false;
+          }
+          return [locals, parts.join('')];
+        }
+      }();
+    }
+
+    function IndexExpression(node, entry) {
+      var expression = Expression(node, entry);
+
+      // This is analogous to `ComplexString` in that an individual index can 
+      // only be visited once during the resolution of an Entity.  `dirty` is 
+      // set in a closure context of the returned function.
+      return function() {
+        var dirty = false;
+        return function indexExpression(locals, ctxdata) {
+          if (dirty) {
+            throw new RuntimeError('Cyclic reference detected');
+          }
+          dirty = true;
+          try {
+            // We need to resolve `expression` here so that we catch errors 
+            // thrown deep within.  Without `_resolve` we might end up with an 
+            // unresolved Entity object, and no "Cyclic reference detected" 
+            // error would be thown.
+            var retval = _resolve(expression, locals, ctxdata);
+          } catch (e) {
+            // If it's an `IndexError` thrown deeper within `expression`, it 
+            // has already been emitted by its `indexExpression`.  We can 
+            // safely re-throw it here.
+            if (e instanceof IndexError) {
+              throw e;
+            }
+
+            // Otherwise, make sure it's a `RuntimeError` or a `ValueError` and 
+            // throw and emit an `IndexError`.
+            //
+            // If it's a `ValueError` we want to replace it by an `IndexError` 
+            // here so that `ValueErrors` from the index don't make their way 
+            // up to the context.  The context only cares about ValueErrors 
+            // thrown by the value of the entity it has requested, not entities 
+            // used in the index.
             //
             // To illustrate this point with an example, consider the following 
             // two strings, where `foo` is a missing entity.
@@ -2440,14 +2508,40 @@ define('l20n/compiler', function(require, exports, module) {
             //     }>
             //
             // On the other hand, `prompt2` will throw an `IndexError`.  This 
-            // is a more serious scenatio for the context.  We should not 
+            // is a more serious scenario for the context.  We should not 
             // assume that we know which variant to show to the user.  In fact, 
             // in the above (much contrived, but still) example, showing the 
             // incorrect variant will likely lead to data loss.  The context 
             // should be more strict in this case and should not try to recover 
             // from this error too hard.
+            requireCompilerError(e);
             throw emit(IndexError, e.message, entry);
+          } finally {
+            dirty = false;
           }
+          return [locals, retval];
+        }
+      }();
+    }
+
+    function HashLiteral(node, entry, index) {
+      var content = {};
+      // if absent, `defaultKey` and `defaultIndex` are undefined
+      var defaultKey;
+      var defaultIndex = index.length ? index.shift() : undefined;
+      for (var i = 0; i < node.content.length; i++) {
+        var elem = node.content[i];
+        // use `elem.value` to skip `HashItem` and create the value right away
+        content[elem.key.name] = Expression(elem.value, entry, index);
+        if (elem.default) {
+          defaultKey = elem.key.name;
+        }
+      }
+      return function hashLiteral(locals, ctxdata, prop) {
+        var keysToTry = [prop, defaultIndex, defaultKey];
+        var keysTried = [];
+        for (var i = 0; i < keysToTry.length; i++) {
+          var key = _resolve(keysToTry[i], locals, ctxdata);
           if (key === undefined) {
             continue;
           }
@@ -2460,165 +2554,134 @@ define('l20n/compiler', function(require, exports, module) {
           }
         }
 
-        throw emit(IndexError,
-                   keysTried.length ? 
-                     'Hash key lookup failed (tried "' + keysTried.join('", "') + '").' :
-                     'Hash key lookup failed.',
-                   entry);
+        // If no valid key was found, throw an `IndexError`
+        if (keysTried.length) {
+          var message = 'Hash key lookup failed ' +
+                        '(tried "' + keysTried.join('", "') + '").';
+        } else {
+          var message = 'Hash key lookup failed.';
+        }
+        throw emit(IndexError, message, entry);
       };
     }
-    function ComplexString(node, entry) {
-      var content = [];
-      for (var i = 0; i < node.content.length; i++) {
-        content.push(Expression(node.content[i], entry));
-      }
-      // Every complexString needs to have its own `dirty` flag whose state 
-      // persists across multiple calls to the given complexString.  On the other 
-      // hand, `dirty` must not be shared by all complexStrings.  Hence the need 
-      // to define `dirty` as a variable available in the closure.  Note that the 
-      // anonymous function is a self-invoked one and it returns the closure 
-      // immediately.
-      return function() {
-        var dirty = false;
-        return function complexString(locals, ctxdata) {
-          if (dirty) {
-            throw new RuntimeError("Cyclic reference detected", entry);
-          }
-          dirty = true;
-          var parts = [];
-          try {
-            for (var i = 0; i < content.length; i++) {
-              var part = _resolve(content[i], locals, ctxdata);
-              if (typeof part !== 'string' && typeof part !== 'number') {
-                throw new RuntimeError('Placeables must be strings or numbers', 
-                                       entry);
-              }
-              parts.push(part);
-            }
-          } finally {
-            dirty = false;
-          }
-          return [locals, parts.join('')];
-        }
-      }();
-    }
+
 
     function UnaryOperator(token, entry) {
       if (token == '-') return function negativeOperator(argument) {
         if (typeof argument !== 'number') {
-          throw new RuntimeError('The unary - operator takes a number', entry);
+          throw new RuntimeError('The unary - operator takes a number');
         }
         return -argument;
       };
       if (token == '+') return function positiveOperator(argument) {
         if (typeof argument !== 'number') {
-          throw new RuntimeError('The unary + operator takes a number', entry);
+          throw new RuntimeError('The unary + operator takes a number');
         }
         return +argument;
       };
       if (token == '!') return function notOperator(argument) {
         if (typeof argument !== 'boolean') {
-          throw new RuntimeError('The ! operator takes a boolean', entry);
+          throw new RuntimeError('The ! operator takes a boolean');
         }
         return !argument;
       };
-      throw emit(CompilationError, "Unknown token: " + token, entry);
+      throw emit(CompilationError, 'Unknown token: ' + token, entry);
     }
     function BinaryOperator(token, entry) {
       if (token == '==') return function equalOperator(left, right) {
         if ((typeof left !== 'number' || typeof right !== 'number') &&
             (typeof left !== 'string' || typeof right !== 'string')) {
-          throw new RuntimeError('The == operator takes two numbers or '+
-                                 'two strings', entry);
+          throw new RuntimeError('The == operator takes two numbers or ' +
+                                 'two strings');
         }
         return left == right;
       };
       if (token == '!=') return function notEqualOperator(left, right) {
         if ((typeof left !== 'number' || typeof right !== 'number') &&
             (typeof left !== 'string' || typeof right !== 'string')) {
-          throw new RuntimeError('The != operator takes two numbers or '+
-                                 'two strings', entry);
+          throw new RuntimeError('The != operator takes two numbers or ' +
+                                 'two strings');
         }
         return left != right;
       };
       if (token == '<') return function lessThanOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The < operator takes two numbers', entry);
+          throw new RuntimeError('The < operator takes two numbers');
         }
         return left < right;
       };
       if (token == '<=') return function lessThanEqualOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The <= operator takes two numbers', entry);
+          throw new RuntimeError('The <= operator takes two numbers');
         }
         return left <= right;
       };
       if (token == '>') return function greaterThanOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The > operator takes two numbers', entry);
+          throw new RuntimeError('The > operator takes two numbers');
         }
         return left > right;
       };
       if (token == '>=') return function greaterThanEqualOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The >= operator takes two numbers', entry);
+          throw new RuntimeError('The >= operator takes two numbers');
         }
         return left >= right;
       };
       if (token == '+') return function addOperator(left, right) {
         if ((typeof left !== 'number' || typeof right !== 'number') &&
             (typeof left !== 'string' || typeof right !== 'string')) {
-          throw new RuntimeError('The + operator takes two numbers or '+
-                                 'two strings', entry);
+          throw new RuntimeError('The + operator takes two numbers or ' +
+                                 'two strings');
         }
         return left + right;
       };
       if (token == '-') return function substractOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The - operator takes two numbers', entry);
+          throw new RuntimeError('The - operator takes two numbers');
         }
         return left - right;
       };
       if (token == '*') return function multiplyOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The * operator takes two numbers', entry);
+          throw new RuntimeError('The * operator takes two numbers');
         }
         return left * right;
       };
       if (token == '/') return function devideOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The / operator takes two numbers', entry);
+          throw new RuntimeError('The / operator takes two numbers');
         }
         if (right == 0) {
-          throw new RuntimeError('Division by zero not allowed.', entry);
+          throw new RuntimeError('Division by zero not allowed.');
         }
         return left / right;
       };
       if (token == '%') return function moduloOperator(left, right) {
         if (typeof left !== 'number' || typeof right !== 'number') {
-          throw new RuntimeError('The % operator takes two numbers', entry);
+          throw new RuntimeError('The % operator takes two numbers');
         }
         if (right == 0) {
-          throw new RuntimeError('Modulo zero not allowed.', entry);
+          throw new RuntimeError('Modulo zero not allowed.');
         }
         return left % right;
       };
-      throw emit(CompilationError, "Unknown token: " + token, entry);
+      throw emit(CompilationError, 'Unknown token: ' + token, entry);
     }
     function LogicalOperator(token, entry) {
       if (token == '&&') return function andOperator(left, right) {
         if (typeof left !== 'boolean' || typeof right !== 'boolean') {
-          throw new RuntimeError('The && operator takes two booleans', entry);
+          throw new RuntimeError('The && operator takes two booleans');
         }
         return left && right;
       };
       if (token == '||') return function orOperator(left, right) {
         if (typeof left !== 'boolean' || typeof right !== 'boolean') {
-          throw new RuntimeError('The || operator takes two booleans', entry);
+          throw new RuntimeError('The || operator takes two booleans');
         }
         return left || right;
       };
-      throw emit(CompilationError, "Unknown token: " + token, entry);
+      throw emit(CompilationError, 'Unknown token: ' + token, entry);
     }
     function UnaryExpression(node, entry) {
       var operator = UnaryOperator(node.operator.token, entry);
@@ -2656,8 +2719,8 @@ define('l20n/compiler', function(require, exports, module) {
       return function conditionalExpression(locals, ctxdata) {
         var tested = _resolve(test, locals, ctxdata);
         if (typeof tested !== 'boolean') {
-          throw new RuntimeError('Conditional expressions must test a boolean', 
-                                 entry);
+          throw new RuntimeError('Conditional expressions must test a ' + 
+                                 'boolean');
         }
         if (tested === true) {
           return consequent(locals, ctxdata);
@@ -2680,12 +2743,12 @@ define('l20n/compiler', function(require, exports, module) {
         // callee is an expression pointing to a macro, e.g. an identifier
         var macro = callee(locals, ctxdata);
         locals = macro[0], macro = macro[1];
-        if (!macro._call) {
-          throw new RuntimeError('Expected a macro, got a non-callable.',
-                                 entry);
+        if (!macro.expression) {
+          throw new RuntimeError('Expected a macro, got a non-callable.');
         }
-        // rely entirely on the platform implementation to detect recursion
-        return macro._call(ctxdata, evaluated_args);
+        // Rely entirely on the platform implementation to detect recursion.
+        // `Macro::_call` assigns `evaluated_args` to members of `locals`.
+        return macro._call(evaluated_args, ctxdata);
       };
     }
     function PropertyExpression(node, entry) {
@@ -2697,29 +2760,51 @@ define('l20n/compiler', function(require, exports, module) {
         var prop = _resolve(property, locals, ctxdata);
         var parent = expression(locals, ctxdata);
         locals = parent[0], parent = parent[1];
-        // If `parent` is an Entity or an Attribute, evaluate its value via the 
-        // `_yield` method.  This will ensure the correct value of 
-        // `locals.__this__`.
-        if (parent._yield) {
-          return parent._yield(ctxdata, prop);
+
+        // At this point, `parent` can be anything and we need to do some 
+        // type-checking to handle erros gracefully (bug 883664) and securely 
+        // (bug 815962).
+
+        // If `parent` is an Entity or an Attribute, `locals` has been 
+        // correctly set up by Identifier
+        if (parent && parent.value !== undefined) {
+          if (typeof parent.value !== 'function') {
+            throw new RuntimeError('Cannot get property of a ' +
+                                   typeof parent.value + ': ' + prop);
+          }
+          return parent.value(locals, ctxdata, prop);
         }
+
+        // If it's a hashLiteral or stringLiteral inside a hash, just call it
+        if (typeof parent === 'function') {
+          return parent(locals, ctxdata, prop);
+        }
+        if (parent && parent.expression) {
+          throw new RuntimeError('Cannot get property of a macro: ' + prop);
+        }
+
         // If `parent` is an object passed by the developer to the context 
-        // (i.e., `expression` was a `VariableExpression`), simply return the 
-        // member of the object corresponding to `prop`.  We don't really care 
-        // about `locals` here.
-        if (typeof parent !== 'function') {
+        // (i.e., `expression` was a `VariableExpression`) or a global, return 
+        // the member of the object corresponding to `prop`
+        if (typeof parent === 'object') {
+          if (parent === null) {
+            throw new RuntimeError('Cannot get property of a null: ' + prop);
+          }
+          if (Array.isArray(parent)) {
+            throw new RuntimeError('Cannot get property of an array: ' + prop);
+          }
           if (!parent.hasOwnProperty(prop)) {
-            throw new RuntimeError(prop + ' is not defined.',
-                                   entry);
+            throw new RuntimeError(prop + ' is not defined on the object.');
           }
           return [locals, parent[prop]];
         }
-        return parent(locals, ctxdata, prop);
+
+        // otherwise it's a primitive
+        throw new RuntimeError('Cannot get property of a ' + typeof parent + 
+                               ': ' + prop);
       }
     }
     function AttributeExpression(node, entry) {
-      // XXX looks similar to PropertyExpression, but it's actually closer to 
-      // Identifier
       var expression = Expression(node.expression, entry);
       var attribute = node.computed ?
         Expression(node.attribute, entry) :
@@ -2728,7 +2813,13 @@ define('l20n/compiler', function(require, exports, module) {
         var attr = _resolve(attribute, locals, ctxdata);
         var entity = expression(locals, ctxdata);
         locals = entity[0], entity = entity[1];
-        // XXX what if it's not an entity?
+        if (!entity.attributes) {
+          throw new RuntimeError('Cannot get attribute of a non-entity: ' +
+                                 attr);
+        }
+        if (!entity.attributes.hasOwnProperty(attr)) {
+          throw new RuntimeError(entity.id + ' has no attribute ' + attr);
+        }
         return [locals, entity.attributes[attr]];
       }
     }
@@ -2746,10 +2837,9 @@ define('l20n/compiler', function(require, exports, module) {
 
 
   // `CompilerError` is a general class of errors emitted by the Compiler.
-  function CompilerError(message, entry) {
+  function CompilerError(message) {
     this.name = 'CompilerError';
     this.message = message;
-    this.entry = entry.id;
   }
   CompilerError.prototype = Object.create(Error.prototype);
   CompilerError.prototype.constructor = CompilerError;
@@ -2757,8 +2847,9 @@ define('l20n/compiler', function(require, exports, module) {
   // `CompilationError` extends `CompilerError`.  It's a class of errors 
   // which happen during compilation of the AST.
   function CompilationError(message, entry) {
-    CompilerError.call(this, message, entry);
+    CompilerError.call(this, message);
     this.name = 'CompilationError';
+    this.entry = entry.id;
   }
   CompilationError.prototype = Object.create(CompilerError.prototype);
   CompilationError.prototype.constructor = CompilationError;
@@ -2766,24 +2857,25 @@ define('l20n/compiler', function(require, exports, module) {
   // `RuntimeError` extends `CompilerError`.  It's a class of errors which 
   // happen during the evaluation of entries, i.e. when you call 
   // `entity.toString()`.
-  function RuntimeError(message, entry) {
-    CompilerError.call(this, message, entry);
+  function RuntimeError(message) {
+    CompilerError.call(this, message);
     this.name = 'RuntimeError';
   };
   RuntimeError.prototype = Object.create(CompilerError.prototype);
-  RuntimeError.prototype.constructor = RuntimeError;;
+  RuntimeError.prototype.constructor = RuntimeError;
 
   // `ValueError` extends `RuntimeError`.  It's a class of errors which 
   // happen during the composition of a ComplexString value.  It's easier to 
   // recover from than an `IndexError` because at least we know that we're 
   // showing the correct member of the hash.
   function ValueError(message, entry, source) {
-    RuntimeError.call(this, message, entry);
+    RuntimeError.call(this, message);
     this.name = 'ValueError';
+    this.entry = entry.id;
     this.source = source;
   }
   ValueError.prototype = Object.create(RuntimeError.prototype);
-  ValueError.prototype.constructor = ValueError;;
+  ValueError.prototype.constructor = ValueError;
 
   // `IndexError` extends `RuntimeError`.  It's a class of errors which 
   // happen during the lookup of a hash member.  It's harder to recover 
@@ -2791,11 +2883,12 @@ define('l20n/compiler', function(require, exports, module) {
   // entity value to show and in case the meanings are divergent, the 
   // consequences for the user can be serious.
   function IndexError(message, entry) {
-    RuntimeError.call(this, message, entry);
+    RuntimeError.call(this, message);
     this.name = 'IndexError';
+    this.entry = entry.id;
   };
   IndexError.prototype = Object.create(RuntimeError.prototype);
-  IndexError.prototype.constructor = IndexError;;
+  IndexError.prototype.constructor = IndexError;
 
   function requireCompilerError(e) {
     if (!(e instanceof CompilerError)) {
@@ -2807,8 +2900,8 @@ define('l20n/compiler', function(require, exports, module) {
 
 });
 /*
- *	Any copyright is dedicated to the Public Domain.
- *	http://creativecommons.org/publicdomain/zero/1.0/
+ *  Any copyright is dedicated to the Public Domain.
+ *  http://creativecommons.org/publicdomain/zero/1.0/
  */
 
 define('l20n/promise', function(require, exports, module) {
@@ -2821,10 +2914,10 @@ define('l20n/promise', function(require, exports, module) {
     this._cb = {
       fulfilled: [],
       rejected: []
-    }
+    };
 
     this._thenPromises = []; /* promises returned by then() */
-  }
+  };
 
   Promise.all = function(list) {
     var pr = new Promise();
@@ -2845,12 +2938,12 @@ define('l20n/promise', function(require, exports, module) {
       list[idx].then(onResolve, onResolve);
     }
     return pr;
-  }
+  };
 
   /**
-   * @param {function} onFulfilled To be called once this promise gets fulfilled
-   * @param {function} onRejected To be called once this promise gets rejected
-   * @returns {Promise}
+   * @param {function} onFulfilled To be called once this promise is fulfilled.
+   * @param {function} onRejected To be called once this promise is rejected.
+   * @return {Promise}
    */
   Promise.prototype.then = function(onFulfilled, onRejected) {
     this._cb.fulfilled.push(onFulfilled);
@@ -2866,7 +2959,7 @@ define('l20n/promise', function(require, exports, module) {
 
     // 3.2.6. then must return a promise.
     return thenPromise; 
-  }
+  };
 
   /**
    * Fulfill this promise with a given value
@@ -2881,7 +2974,7 @@ define('l20n/promise', function(require, exports, module) {
     this._processQueue();
 
     return this;
-  }
+  };
 
   /**
    * Reject this promise with a given value
@@ -2896,7 +2989,7 @@ define('l20n/promise', function(require, exports, module) {
     this._processQueue();
 
     return this;
-  }
+  };
 
   Promise.prototype._processQueue = function() {
     while (this._thenPromises.length) {
@@ -2904,12 +2997,12 @@ define('l20n/promise', function(require, exports, module) {
       var onRejected = this._cb.rejected.shift();
       this._executeCallback(this._state == 1 ? onFulfilled : onRejected);
     }
-  }
+  };
 
   Promise.prototype._executeCallback = function(cb) {
     var thenPromise = this._thenPromises.shift();
 
-    if (typeof(cb) != "function") {
+    if (typeof(cb) != 'function') {
       if (this._state == 1) {
         // 3.2.6.4. If onFulfilled is not a function and promise1 is fulfilled, 
         // promise2 must be fulfilled with the same value.
@@ -2925,13 +3018,13 @@ define('l20n/promise', function(require, exports, module) {
     try {
       var returned = cb(this._value);
 
-      if (returned && typeof(returned.then) == "function") {
+      if (returned && typeof(returned.then) == 'function') {
         // 3.2.6.3. If either onFulfilled or onRejected returns a promise (call 
         // it returnedPromise), promise2 must assume the state of 
         // returnedPromise
         var fulfillThenPromise = function(value) { thenPromise.fulfill(value); 
-        }
-        var rejectThenPromise = function(value) { thenPromise.reject(value); }
+        };
+        var rejectThenPromise = function(value) { thenPromise.reject(value); };
         returned.then(fulfillThenPromise, rejectThenPromise);
       } else {
         // 3.2.6.1. If either onFulfilled or onRejected returns a value that is 
@@ -2946,7 +3039,7 @@ define('l20n/promise', function(require, exports, module) {
       thenPromise.reject(e); 
 
     }
-  }
+  };
 
   exports.Promise = Promise;
 
@@ -3075,7 +3168,7 @@ define('l20n/retranslation', function(require, exports, module) {
 
   RetranslationManager.registerGlobal = function(ctor) {
     RetranslationManager._constructors.push(ctor);
-  }
+  };
 
   exports.RetranslationManager = RetranslationManager;
 
@@ -3095,7 +3188,7 @@ define('l20n/platform/globals', function(require, exports, module) {
 
   Global.prototype._get = function _get() {
     throw new Error('Not implemented');
-  }
+  };
 
   Global.prototype.get = function get() {
     // invalidate the cached value if the global is not active;  active 
@@ -3104,14 +3197,14 @@ define('l20n/platform/globals', function(require, exports, module) {
       this.value = this._get();
     }
     return this.value;
-  }
+  };
 
   Global.prototype.addEventListener = function(type, listener) {
     if (type !== 'change') {
-      throw "Unknown event type";
+      throw 'Unknown event type';
     }
     this._emitter.addEventListener(type, listener);
-  }
+  };
 
 
   // XXX: https://bugzilla.mozilla.org/show_bug.cgi?id=865226
@@ -3133,7 +3226,7 @@ define('l20n/platform/globals', function(require, exports, module) {
         width: {
           px: document.body.clientWidth
         }
-      }
+      };
     }
 
     function activate() {
@@ -3288,6 +3381,18 @@ define('l20n/platform/io', function(require, exports, module) {
 });
 define('l20n/intl', function(require, exports, module) {
   'use strict';
+
+  if (!String.prototype.startsWith) {
+    Object.defineProperty(String.prototype, 'startsWith', {
+      enumerable: false,
+      configurable: false,
+      writable: false,
+      value: function (searchString, position) {
+        position = position || 0;
+        return this.indexOf(searchString, position) === position;
+      }
+    });
+  }
 
   var unicodeLocaleExtensionSequence = "-u(-[a-z0-9]{2,8})+";
   var unicodeLocaleExtensionSequenceRE = new RegExp(unicodeLocaleExtensionSequence);

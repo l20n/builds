@@ -1,4 +1,4 @@
-l20n.min.js
+L20n builds
 ===========
 
 This repository contains the optimized and minified versions of l20n.js.  The 

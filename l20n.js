@@ -582,6 +582,11 @@ define('l20n/context', function(require, exports, module) {
     this.addEventListener = addEventListener;
     this.removeEventListener = removeEventListener;
 
+    Object.defineProperty(this, 'supportedLocales', {
+      get: function() { return _fallbackChain.slice(); },
+      enumerable: true
+    });
+
     var _data = {};
 
     // language negotiator function

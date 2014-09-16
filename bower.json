@@ -2,7 +2,7 @@
     "name": "l20n",
     "main": "l20n.js",
     "description": "A natural-language localization framework",
-    "version": "1.0.0-rc",
+    "version": "1.0.1",
     "homepage": "http://l20n.org",
     "authors": [
       "Mozilla <l10n-drivers@mozilla.org>",

@@ -497,7 +497,7 @@ define('l20n/context', function(require, exports) {
     this.resources = [];
     this.source = null;
     this.ast = {
-      type: 'LOL',
+      type: 'L20n',
       body: []
     };
 
@@ -599,7 +599,7 @@ define('l20n/context', function(require, exports) {
     this.resources = [];
     this.entries = null;
     this.ast = {
-      type: 'LOL',
+      type: 'L20n',
       body: []
     };
     this.isReady = false;
@@ -1058,16 +1058,16 @@ define('l20n/context', function(require, exports) {
     }
 
     function freeze(fallbackChain) {
-      _fallbackChain = fallbackChain;
-      var locale = getLocale(_fallbackChain[0]);
+      var locale = getLocale(fallbackChain[0]);
       if (locale.isReady) {
-        setReady();
+        setReady(fallbackChain);
       } else {
-        locale.build(setReady);
+        locale.build(setReady.bind(null, fallbackChain));
       }
     }
 
-    function setReady() {
+    function setReady(fallbackChain) {
+      _fallbackChain = fallbackChain;
       _isReady = true;
       _retr.all(_fallbackChain.slice());
       _emitter.emit('ready');
@@ -1185,12 +1185,12 @@ define('l20n/parser', function(require, exports) {
 
     var _source, _index, _length, _emitter;
 
-    var getLOL;
+    var getL20n;
     if (throwOnErrors) {
-      getLOL = getLOLPlain;
+      getL20n = getL20nPlain;
     } else {
       _emitter = new EventEmitter();
-      getLOL = getLOLWithRecover;
+      getL20n = getL20nWithRecover;
     }
 
     function getComment() {
@@ -1627,7 +1627,7 @@ define('l20n/parser', function(require, exports) {
       throw error('Invalid entry');
     }
 
-    function getLOLWithRecover() {
+    function getL20nWithRecover() {
       var entries = [];
 
       getWS();
@@ -1648,12 +1648,12 @@ define('l20n/parser', function(require, exports) {
       }
 
       return {
-        type: 'LOL',
+        type: 'L20n',
         body: entries
       };
     }
 
-    function getLOLPlain() {
+    function getL20nPlain() {
       var entries = [];
 
       getWS();
@@ -1665,7 +1665,7 @@ define('l20n/parser', function(require, exports) {
       }
 
       return {
-        type: 'LOL',
+        type: 'L20n',
         body: entries
       };
     }
@@ -1677,7 +1677,7 @@ define('l20n/parser', function(require, exports) {
       _index = 0;
       _length = _source.length;
 
-      return getLOL();
+      return getL20n();
     }
 
     function addEvent(type, listener) {
